@@ -1,0 +1,11 @@
+# 忽略缓存和编辑器配置
+__pycache__/
+.idea/
+.vscode/
+*.log
+
+# 忽略图片资源和模板文件夹
+yys_auto/
+*.png
+*.jpg
+*.jpeg

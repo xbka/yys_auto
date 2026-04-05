@@ -1,0 +1,9 @@
+# 核心依赖
+pyautogui==0.9.54          # 自动化控制鼠标键盘
+opencv-python==4.9.0.80    # 计算机视觉处理 (cv2)
+numpy==1.26.4              # 数值计算基础库
+Pillow==10.3.0              # PIL 图像处理库 (PIL)
+matplotlib==3.8.4          # 数据可视化
+
+# Windows 系统依赖
+pywin32==306               # Windows API (win32api)
