@@ -300,23 +300,32 @@ class AutoClickerBot:
         self.begin_count = 0
         self.end_count = 0
         
+        # [逻辑优化] 增加“初次运行”标记
+        self.is_first_run = True
+        
         # 防封机制：设定下一次触发长时间休眠的随机执行次数
         self.next_rest_count = random.randint(-10, 10) + 60
         
         # 用于图表绘制的历史坐标记录
         self.click_history = {"begin": [], "mvp": [], "end": []}
 
-    def capture_window(self):
-        """定位目标窗口并进行屏幕截图。"""
+    def capture_window(self, force_activate=False):
+        """定位目标窗口并进行屏幕截图。增加 force_activate 参数控制是否强制激活窗口。"""
         windows = pyautogui.getWindowsWithTitle(self.window_title)
         if not windows:
             raise Exception(f"未找到窗口: {self.window_title}")
         window = windows[0]
         
-        # 如果窗口被最小化，则强制恢复并置顶激活，确保能够正常截取画面
-        if window.isMinimized:
-            window.restore()
-        window.activate()
+        # [核心优化] 仅在满足特定条件（首次或识别失败过多）时执行激活
+        if force_activate:
+            # 如果窗口被最小化，则强制恢复并置顶激活，确保能够正常截取画面
+            if window.isMinimized:
+                window.restore()
+            try:
+                window.activate()
+                print(f"[{self.window_title}] 触发按需激活：提升窗口至前台")
+            except Exception as e:
+                print(f"[{self.window_title}] 激活失败（通常不影响截图）：{e}")
         
         left, top, width, height = window.left, window.top, window.width, window.height
         screenshot = pyautogui.screenshot(region=(left, top, width, height))
@@ -386,7 +395,16 @@ class AutoClickerBot:
     def run_step(self):
         """执行单次完整的截图、缩放比例计算及模板匹配流程。"""
         try:
-            screenshot, left, top, width, height = self.capture_window()
+            # [核心优化] 决定本次循环是否需要激活窗口
+            # 条件：1. 脚本刚开始运行 2. 识别失败次数正好达到 15 次（预判可能被遮挡）
+            should_activate = False
+            if self.is_first_run:
+                should_activate = True
+                self.is_first_run = False
+            elif self.err == 15:
+                should_activate = True
+
+            screenshot, left, top, width, height = self.capture_window(force_activate=should_activate)
             screenshot_cv = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
             
             # 计算当前窗口宽度的缩放比例
@@ -400,6 +418,12 @@ class AutoClickerBot:
                 self.process_match(match_result, left, top)
             else:
                 self.err += 1
+                if self.err % 10 == 0: # 每连续 10 次未找到目标，输出一次警告日志
+                    print(f"[{self.window_title}] 扫描中... 未找到匹配目标 (连续失败 {self.err} 次)")
+                # if self.err == 5:
+                #     debug_filename = f"debug_{self.window_title}.png"
+                #     cv2.imwrite(debug_filename, screenshot_cv)
+                #     print(f"[{self.window_title}] 📸 警告！已保存机器人的真实视角到 {debug_filename}，快去项目文件夹看看它截得对不对！")
 
         except Exception as e:
             print(f"[{self.window_title}] 操作异常: {e}")
@@ -519,7 +543,7 @@ if __name__ == "__main__":
     
     # 2. 挂机任务定义与图片路径配置
     # 结构：(文件夹路径列表, 对应标签列表)
-    task1_dir = "yys_auto/huodong"
+    task1_dir = "yys_auto/chi"
     task1_config = (
         [os.path.join(task1_dir, "begin"), os.path.join(task1_dir, "end")],
         ["begin", "end"]
@@ -534,20 +558,20 @@ if __name__ == "__main__":
     xiaobai_bot = AutoClickerBot(
         window_title="小白",                    # [配置项] 必须完全匹配模拟器窗口的标题名称
         task_config=task1_config,             # [配置项] 绑定上方定义的业务任务
-        limit=500,                            # [配置项] 执行成功多少次后自动停止
+        limit=0,                            # [配置项] 执行成功多少次后自动停止
         baseline_width=task1_baseline_width, 
         shared_queue=master_queue,
-        screen_config=SCREENS["left_sub"]     # [配置项] 指定该模拟器所在的物理屏幕
+        screen_config=SCREENS["main"]     # [配置项] 指定该模拟器所在的物理屏幕
     )
     
     # 账号2
     yangyang_bot = AutoClickerBot(
         window_title="枯条", 
         task_config=task1_config, 
-        limit=0,                              
+        limit=200,                              
         baseline_width=task1_baseline_width, 
         shared_queue=master_queue,
-        screen_config=SCREENS["left_sub"]     # [配置项] 指定该模拟器所在的物理屏幕
+        screen_config=SCREENS["main"]     # [配置项] 指定该模拟器所在的物理屏幕
     )
     
     # ================= 控制面板结束 =================
