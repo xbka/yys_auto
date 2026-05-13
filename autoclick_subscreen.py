@@ -211,6 +211,9 @@ class TemplateManager:
     def __init__(self, task_config):
         self.folders, self.labels = task_config
         self.templates = {}  
+        # [新增] 缓存机制：记录已缩放的模板，避免每帧重复计算 resize 耗费 CPU
+        self.cached_templates = {}
+        self.current_scale = None
         self._load_templates_to_memory()
 
     def _load_templates_to_memory(self):
@@ -239,21 +242,29 @@ class TemplateManager:
         [核心逻辑] 在截图中寻找匹配度最高的特征。
         scale 参数允许当游戏窗口被拉伸缩放时，代码动态缩放内存中的模板进行适配。
         """
-        candidate_matches = []
-        for class_name, img_list in self.templates.items():
-            for file_name, template_img in img_list:
-                # 如果窗口发生了形变，等比例缩放模板图片
-                if scale != 1.0:
-                    new_w = int(template_img.shape[1] * scale)
-                    new_h = int(template_img.shape[0] * scale)
-                    if new_w == 0 or new_h == 0:
-                        continue
-                    # 缩小图片用 INTER_AREA，放大用 INTER_LINEAR，保证图像质量
-                    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
-                    current_template = cv2.resize(template_img, (new_w, new_h), interpolation=interpolation)
-                else:
-                    current_template = template_img
+        # [优化] 判定缩放比例是否变化。若未变化则直接使用缓存的模板列表，极大节省计算资源。
+        if scale != self.current_scale:
+            self.cached_templates = {}
+            for class_name, img_list in self.templates.items():
+                self.cached_templates[class_name] = []
+                for file_name, template_img in img_list:
+                    if scale != 1.0:
+                        new_w = int(template_img.shape[1] * scale)
+                        new_h = int(template_img.shape[0] * scale)
+                        if new_w == 0 or new_h == 0:
+                            continue
+                        # 缩小图片用 INTER_AREA，放大用 INTER_LINEAR，保证图像质量
+                        interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+                        resized = cv2.resize(template_img, (new_w, new_h), interpolation=interpolation)
+                        self.cached_templates[class_name].append(resized)
+                    else:
+                        self.cached_templates[class_name].append(template_img)
+            self.current_scale = scale
+            print(f"[系统] 检测到窗口比例调整，已重新生成并缓存模板缓存(当前缩放: {scale:.4f})")
 
+        candidate_matches = []
+        for class_name, img_list in self.cached_templates.items():
+            for current_template in img_list:
                 # 容错：防止因缩放导致模板尺寸大于截图尺寸而引发 OpenCV 崩溃
                 if current_template.shape[0] > screenshot_cv.shape[0] or current_template.shape[1] > screenshot_cv.shape[1]:
                     continue
@@ -292,6 +303,9 @@ class AutoClickerBot:
         self.screen_config = screen_config
         
         self.template_manager = TemplateManager(task_config)
+
+        # [新增] 线程锁：防止 MouseWorker 线程与 Bot 扫描线程同时读写状态属性导致的冲突
+        self.lock = threading.Lock()
         
         # 状态机计数器
         self.action_count = 0
@@ -299,6 +313,10 @@ class AutoClickerBot:
         self.err_count = 0
         self.begin_count = 0
         self.end_count = 0
+        
+        # [新增] 运行时间统计属性
+        self.last_begin_time = None
+        self.durations = []
         
         # [逻辑优化] 增加“初次运行”标记
         self.is_first_run = True
@@ -380,17 +398,41 @@ class AutoClickerBot:
 
     def on_click_success(self, class_name, x, y):
         """回调函数：由 MouseWorker 线程在执行完鼠标操作后调用，用于更新当前 Bot 的业务进度。"""
-        if class_name in self.click_history:
-            self.click_history[class_name].append((x, -y))
+        # [优化] 修改共享状态属性前加锁，保证线程安全
+        with self.lock:
+            if class_name in self.click_history:
+                self.click_history[class_name].append((x, -y))
 
-        if class_name == "begin":
-            self.begin_count += 1
-            self.end_count = 0
-            self.action_count += 1
-            print(f"[{self.window_title}] [执行统计] 成功点击！当前已执行: {self.action_count} 次")
-        elif class_name == "end":
-            self.end_count += 1
-            self.begin_count = 0
+            if class_name == "begin":
+                # [新增] 记录本轮耗时并更新全局平均耗时
+                current_time = time.time()
+                if self.last_begin_time is not None:
+                    duration = current_time - self.last_begin_time
+                    self.durations.append(duration)
+                    
+                    # [核心优化] 计算已完成所有轮次的平均耗时
+                    avg_duration = sum(self.durations) / len(self.durations)
+                    
+                    # 使用平均时间计算预计剩余完成时间
+                    remaining_count = max(0, self.limit - self.action_count - 1)
+                    est_time_sec = avg_duration * remaining_count
+                    
+                    # 格式化预计剩余时间 (总秒数 -> 时, 分, 秒)
+                    rem_m, rem_s = divmod(est_time_sec, 60)
+                    rem_h, rem_m = divmod(rem_m, 60)
+                    
+                    print(f"[{self.window_title}] [效率监控] 本轮耗时: {duration:.1f}秒 | "
+                          f"平均耗时: {avg_duration:.1f}秒 | "
+                          f"预估剩余完成时间: {int(rem_h)}时{int(rem_m)}分{int(rem_s)}秒")
+                
+                self.last_begin_time = current_time
+                self.begin_count += 1
+                self.end_count = 0
+                self.action_count += 1
+                print(f"[{self.window_title}] [执行统计] 成功点击！当前已执行: {self.action_count} 次")
+            elif class_name == "end":
+                self.end_count += 1
+                self.begin_count = 0
 
     def run_step(self):
         """执行单次完整的截图、缩放比例计算及模板匹配流程。"""
@@ -420,23 +462,35 @@ class AutoClickerBot:
                 self.err += 1
                 if self.err % 10 == 0: # 每连续 10 次未找到目标，输出一次警告日志
                     print(f"[{self.window_title}] 扫描中... 未找到匹配目标 (连续失败 {self.err} 次)")
-                # if self.err == 5:
-                #     debug_filename = f"debug_{self.window_title}.png"
-                #     cv2.imwrite(debug_filename, screenshot_cv)
-                #     print(f"[{self.window_title}] 📸 警告！已保存机器人的真实视角到 {debug_filename}，快去项目文件夹看看它截得对不对！")
 
         except Exception as e:
+            # [修正] 针对未找到窗口等异常，如果是 limit=0 本就不该跑到这里，逻辑已在 run() 头部拦截
             print(f"[{self.window_title}] 操作异常: {e}")
 
     def run(self):
         """视觉扫描主循环。"""
+        # [新增逻辑] 若执行次数设定为 0，代表本次不需要运行该账号，直接停止并退出线程
+        if self.limit == 0:
+            print(f"[{self.window_title}] 检测到执行次数为 0，该账号本次任务跳过。")
+            return
+
         # 生成防卡死乱滑时的内缩安全边界，防止触碰屏幕绝对边缘
         safe_xmin = self.screen_config["xmin"] + 10
         safe_xmax = self.screen_config["xmax"] - 10
         safe_ymin = self.screen_config["ymin"] + 10
         safe_ymax = self.screen_config["ymax"] - 10
 
-        while self.action_count < self.limit and not global_stop_event.is_set():
+        while not global_stop_event.is_set():
+            # [优化] 读取共享属性前加锁，避免复合操作非原子性导致的逻辑误判
+            with self.lock:
+                current_action_count = self.action_count
+                current_begin_count = self.begin_count
+                current_end_count = self.end_count
+                current_rest_trigger = self.next_rest_count
+
+            if current_action_count >= self.limit:
+                break
+
             self.run_step()
             
             # 基础扫描间隔，使用切片化睡眠
@@ -461,12 +515,12 @@ class AutoClickerBot:
                     break
             
             # 异常处理 2：同一个按钮连续识别点击超过 10 次，判定为画面死机或网络断开
-            if self.begin_count > 10 or self.end_count > 10:
+            if current_begin_count > 10 or current_end_count > 10:
                 print(f"[{self.window_title}] 画面疑似卡住，线程即将退出。")
                 break
                 
             # 防封处理：执行次数到达设定阈值，强制执行长时间随机休眠模拟真人走神
-            if self.action_count >= self.next_rest_count:
+            if current_action_count >= current_rest_trigger:
                 print(f"[{self.window_title}] [防封机制] 触发随机休息...")
                 for _ in range(3):
                     if global_stop_event.is_set():
@@ -479,12 +533,17 @@ class AutoClickerBot:
                     })
                     time.sleep(random.uniform(5, 10))
                 # 重新规划下一次休息的触发次数 (当前次数 + 随机偏移)
-                self.next_rest_count = self.action_count + random.randint(45, 65)
+                with self.lock:
+                    self.next_rest_count = self.action_count + random.randint(45, 65)
 
         print(f"[{self.window_title}] 扫描任务完成或已被手动停止。")
 
     def plot_history(self):
         """任务结束后，利用 Matplotlib 绘制该账号本次运行的点击落点散点图。"""
+        # [优化] 如果没有产生点击历史，不执行绘图
+        if not any(self.click_history.values()):
+            return
+
         styles = {
             "begin": {"color": "red", "marker": "o"},
             "end": {"color": "blue", "marker": "s"},
@@ -568,7 +627,7 @@ if __name__ == "__main__":
     yangyang_bot = AutoClickerBot(
         window_title="枯条", 
         task_config=task1_config, 
-        limit=200,                              
+        limit=40,                              # [配置项] 执行次数设为 0，则该账号不运行
         baseline_width=task1_baseline_width, 
         shared_queue=master_queue,
         screen_config=SCREENS["main"]     # [配置项] 指定该模拟器所在的物理屏幕
