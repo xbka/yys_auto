@@ -17,7 +17,16 @@ import eel
 # 把项目根目录加入 path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
-os.chdir(PROJECT_ROOT)
+
+# PyInstaller 打包后的路径处理
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)   # exe 所在目录（可写文件放这里）
+    BUNDLE_DIR = sys._MEIPASS                     # 打包资源目录（只读：frontend/web）
+else:
+    BASE_DIR = PROJECT_ROOT
+    BUNDLE_DIR = PROJECT_ROOT
+
+os.chdir(BASE_DIR)
 
 from frontend.scheduler import BotManager
 
@@ -26,8 +35,8 @@ from frontend.scheduler import BotManager
 # ============================================================
 manager = BotManager()
 _config: dict = {}
-_config_path = os.path.join(PROJECT_ROOT, "config.json")
-_templates_root = os.path.join(PROJECT_ROOT, "templates")
+_config_path = os.path.join(BASE_DIR, "config.json")
+_templates_root = os.path.join(BASE_DIR, "templates")
 
 os.makedirs(_templates_root, exist_ok=True)
 
@@ -465,11 +474,11 @@ def _image_to_base64_thumb(fpath: str, max_size: int = 120) -> str:
 def run():
     """启动 Eel 桌面应用"""
     _load_config()
-    web_dir = os.path.join(os.path.dirname(__file__), "web")
+    web_dir = os.path.join(BUNDLE_DIR, "frontend", "web")
     eel.init(web_dir)
 
     eel_kwargs = {
-        "mode": "chrome",
+        "mode": "default",
         "port": 0,
         "size": (1050, 720),
     }

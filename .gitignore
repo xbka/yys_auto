@@ -1,11 +1,34 @@
-# 忽略缓存和编辑器配置
+# ---- PyInstaller 打包产物（不纳入版本管理）----
+build/
+dist/
+*.spec
+
+# ---- 分发文件夹（通过 Release 单独分发）----
+../yys_auto_dist/
+
+# ---- Python 缓存 ----
 __pycache__/
-.idea/
-.vscode/
+*.py[cod]
+*$py.class
+
+# ---- 日志 ----
+logs/
 *.log
 
-# 忽略图片资源和模板文件夹
-yys_auto/
-*.png
-*.jpg
-*.jpeg
+# ---- 虚拟环境 ----
+venv/
+.venv/
+env/
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- 配置文件（有敏感信息时不提交，提供 config.example.json 即可）----
+config.json
+
+# ---- 系统文件 ----
+.DS_Store
+Thumbs.db
