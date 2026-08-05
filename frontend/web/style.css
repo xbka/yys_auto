@@ -1,0 +1,323 @@
+/* ============================================================
+   阴阳师自动助手 — 样式表 (v2 多实例版)
+   ============================================================ */
+:root {
+  --bg: #1a1a2e;
+  --bg-panel: #16213e;
+  --bg-card: #0f3460;
+  --accent: #e94560;
+  --accent2: #0b8457;
+  --text: #e0e0e0;
+  --text-dim: #888;
+  --border: #2a2a4a;
+  --green: #4ade80;
+  --yellow: #facc15;
+  --red: #ef4444;
+  --radius: 8px;
+  --gap: 12px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+}
+
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ============================================================
+   Header & Tab Nav
+   ============================================================ */
+header {
+  display: flex; align-items: center; gap: 20px;
+  padding: 10px 20px; border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 18px; font-weight: 700; white-space: nowrap; }
+.tabs { display: flex; gap: 4px; }
+.tab {
+  background: none; border: none; color: var(--text-dim);
+  padding: 8px 18px; font-size: 14px; cursor: pointer; font-family: inherit;
+  border-bottom: 2px solid transparent; transition: all 0.2s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ============================================================
+   Tab Content
+   ============================================================ */
+.tab-content {
+  display: none;
+  overflow-y: auto;
+}
+.tab-content.active {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 14px 20px;
+}
+
+/* ============================================================
+   Control Panel — Instances Grid
+   ============================================================ */
+#instancesContainer {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+.section-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: var(--gap); font-weight: 600; font-size: 15px;
+  flex-shrink: 0;
+}
+.section-header .btn-sm { margin-left: 8px; }
+
+.instances-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(450px, 1fr));
+  gap: var(--gap);
+}
+
+/* ---- Instance Card ---- */
+.inst-card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-panel); overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.inst-card.running { border-color: var(--green); }
+.inst-card.paused  { border-color: var(--yellow); }
+.inst-card.stopping { border-color: var(--red); }
+
+.inst-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; background: var(--bg-card);
+}
+.inst-header .inst-name { font-weight: 700; font-size: 14px; }
+.inst-header .inst-state {
+  font-size: 12px; padding: 2px 10px; border-radius: 10px;
+}
+.inst-state.idle     { color: var(--text-dim); background: #333; }
+.inst-state.running  { color: #111; background: var(--green); }
+.inst-state.paused   { color: #111; background: var(--yellow); }
+.inst-state.stopping { color: #fff; background: var(--red); }
+
+/* ---- Instance Config Bar ---- */
+.inst-config {
+  display: flex; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--border); flex-wrap: nowrap; align-items: center;
+}
+.inst-config label { font-size: 11px; color: var(--text-dim); margin-right: 2px; white-space: nowrap; flex-shrink: 0; }
+.inst-config select { font-size: 11px; padding: 3px 6px; min-width: 80px; flex: 1; max-width: none; }
+.inst-config .btn-sm { flex-shrink: 0; }
+
+/* ---- Instance Stats ---- */
+.inst-stats {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+}
+
+.inst-chart {
+  display: block;
+  width: 100%; height: 350px;
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  image-rendering: auto;
+}
+.inst-stat { text-align: center; }
+.inst-stat .stat-label { font-size: 10px; color: var(--text-dim); }
+.inst-stat .stat-value { font-size: 16px; font-weight: 700; color: var(--accent); }
+
+/* ---- Instance Buttons ---- */
+.inst-btns {
+  display: flex; gap: 6px; padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---- Instance Log ---- */
+.inst-log {
+  flex: 1; min-height: 120px; max-height: 220px;
+  overflow-y: auto; padding: 6px 10px;
+  font-family: "Consolas", "Monaco", monospace; font-size: 11px;
+  line-height: 1.5; color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ============================================================
+   Buttons
+   ============================================================ */
+.btn {
+  padding: 7px 16px; border: none; border-radius: 5px;
+  font-size: 13px; cursor: pointer; transition: all 0.15s; font-family: inherit;
+}
+.btn:hover { filter: brightness(1.15); }
+.btn:active { transform: scale(0.97); }
+.btn-primary { background: var(--accent2); color: #fff; }
+.btn-start { background: var(--green); color: #111; }
+.btn-pause { background: #f59e0b; color: #111; }
+.btn-stop { background: var(--red); color: #fff; }
+.btn-danger { background: #991b1b; color: #fff; }
+.btn-sm { padding: 4px 10px; font-size: 11px; border-radius: 4px; }
+.btn-sm.btn-danger { font-size: 10px; }
+
+/* ============================================================
+   Config Tab
+   ============================================================ */
+.cfg-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+.cfg-group {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  margin-bottom: var(--gap); overflow: hidden;
+}
+.cfg-group summary {
+  cursor: pointer; padding: 10px 14px;
+  background: var(--bg-card); font-weight: 600; font-size: 14px;
+  user-select: none;
+}
+.cfg-group summary:hover { background: #1a3a6a; }
+.cfg-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; border-top: 1px solid var(--border);
+}
+.cfg-row > label { min-width: 100px; font-size: 13px; color: var(--text); }
+.cfg-input {
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 5px 10px; font-size: 13px; font-family: inherit;
+}
+.cfg-num { width: 90px; }
+.cfg-num-sm { width: 65px; }
+.cfg-select {
+  min-width: 200px; max-width: 300px; cursor: pointer;
+}
+.cfg-input:focus, .cfg-select:focus { outline: none; border-color: var(--accent); }
+.cfg-warn { border-color: #f59e0b; background: #1a1a0e; }
+.cfg-hint {
+  color: var(--text-dim); cursor: help; font-size: 15px;
+  margin-left: 4px;
+}
+.cfg-actions {
+  display: flex; gap: 10px; margin-top: var(--gap); padding-bottom: 10px;
+}
+
+/* ============================================================
+   Template Tab
+   ============================================================ */
+.scene-actions { display: flex; gap: 8px; align-items: center; }
+.scene-actions select {
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 6px 12px; font-size: 13px; min-width: 140px; font-family: inherit;
+}
+.templates-dual {
+  flex: 1; min-height: 0;
+  display: flex; gap: var(--gap); margin-top: var(--gap);
+}
+.tpl-col {
+  flex: 1; display: flex; flex-direction: column; min-height: 0;
+  border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;
+}
+.tpl-col h3 {
+  padding: 10px 14px; background: var(--bg-card);
+  font-size: 14px; border-bottom: 1px solid var(--border);
+}
+.tpl-grid {
+  flex: 1; overflow-y: auto; padding: 10px;
+  display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start;
+  min-height: 280px; max-height: 460px;
+}
+.tpl-card {
+  width: 130px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px; text-align: center; position: relative;
+}
+.tpl-card.disabled { opacity: 0.4; }
+.tpl-card img {
+  width: 100%; height: 80px; object-fit: contain;
+  background: #000; border-radius: 4px; margin-bottom: 6px;
+}
+.tpl-card .tmpl-name {
+  font-size: 11px; color: var(--text-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px;
+}
+.tpl-card .tmpl-toggle {
+  font-size: 11px; cursor: pointer;
+  padding: 2px 8px; border-radius: 4px;
+  background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+}
+.tpl-card .tmpl-del {
+  position: absolute; top: 4px; right: 4px;
+  background: var(--red); color: #fff; border: none;
+  width: 18px; height: 18px; border-radius: 50%;
+  font-size: 11px; cursor: pointer; line-height: 18px; text-align: center;
+  opacity: 0; transition: opacity 0.2s;
+}
+.tpl-card:hover .tmpl-del { opacity: 1; }
+.tpl-actions {
+  padding: 10px 14px; display: flex; gap: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* ---- Empty state ---- */
+.empty-hint { color: var(--text-dim); font-size: 13px; text-align: center; padding: 30px; }
+
+/* ============================================================
+   Responsive — 小屏幕 < 1024px
+   ============================================================ */
+@media (max-width: 1024px) {
+  .instances-grid {
+    grid-template-columns: 1fr;
+  }
+  .cfg-row {
+    flex-wrap: wrap;
+  }
+  .cfg-row > label {
+    min-width: 80px;
+  }
+  .templates-dual {
+    flex-direction: column;
+  }
+  .tpl-grid {
+    min-height: 160px;
+    max-height: 300px;
+  }
+  header h1 {
+    font-size: 15px;
+  }
+  .tab {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 640px) {
+  body {
+    font-size: 13px;
+  }
+  .inst-card .inst-stats {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .inst-config {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .cfg-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .tab-content.active {
+    padding: 8px 10px;
+  }
+}

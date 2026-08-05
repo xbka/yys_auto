@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>截取模板</title>
+<script src="/eel.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #111; overflow: hidden;
+    font-family: "Segoe UI","Microsoft YaHei",sans-serif;
+  }
+  #infoBar {
+    position: fixed; top: 0; left: 0; right: 0;
+    padding: 8px 14px; background: rgba(0,0,0,0.85); color: #ccc;
+    font-size: 13px; z-index: 10;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  #infoBar .keys { color: #888; }
+  #canvasWrapper {
+    position: fixed; top: 36px; left: 0; right: 0; bottom: 0;
+    overflow: auto; background: #000;
+    display: flex; justify-content: center; align-items: flex-start;
+  }
+  canvas { display: block; cursor: crosshair; image-rendering: auto; }
+  .btn {
+    padding: 5px 14px; border: 1px solid #555; border-radius: 4px;
+    background: #333; color: #eee; cursor: pointer; font-size: 12px;
+  }
+  .btn:hover { background: #444; }
+</style>
+</head>
+<body>
+
+<div id="infoBar">
+  <span>📸 拖拽框选目标区域 ｜ 当前缩放: <b id="zoomLabel">100%</b></span>
+  <span class="keys">Enter 确认 ｜ Esc 取消 ｜ 滚轮缩放</span>
+</div>
+
+<div id="canvasWrapper">
+  <canvas id="canvas"></canvas>
+</div>
+
+<script>
+"use strict";
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+let img = null;
+let zoom = 1.0;
+let dragging = false;
+let hasSelection = false;
+let startX = 0, startY = 0;
+let selEndX = 0, selEndY = 0;
+let curX = 0, curY = 0;
+
+// ============================================================
+//  加载截图
+// ============================================================
+async function loadScreenshot() {
+  try {
+    const s = await eel.screenshot_screen()();
+    img = new Image();
+    img.onload = () => {
+      // 计算初始缩放，使图片适配窗口
+      const maxW = window.innerWidth;
+      const maxH = window.innerHeight - 40;
+      zoom = Math.min(maxW / img.width, maxH / img.height, 1.0);
+      render();
+    };
+    img.src = "data:image/png;base64," + s.data;
+  } catch (e) {
+    document.getElementById("infoBar").textContent = "❌ 截屏失败：" + e;
+  }
+}
+
+// ============================================================
+//  渲染
+// ============================================================
+function render() {
+  if (!img) return;
+  const w = Math.round(img.width * zoom);
+  const h = Math.round(img.height * zoom);
+  canvas.width = w;
+  canvas.height = h;
+  ctx.drawImage(img, 0, 0, w, h);
+
+  // 绘制选区框
+  const ex = dragging ? curX : selEndX;
+  const ey = dragging ? curY : selEndY;
+  if (dragging || hasSelection) {
+    const x = Math.min(startX, ex);
+    const y = Math.min(startY, ey);
+    const rw = Math.abs(ex - startX);
+    const rh = Math.abs(ey - startY);
+
+    if (!dragging && hasSelection) {
+      // 已确认选区：半透明填充 + 实线边框
+      ctx.fillStyle = "rgba(233,69,96,0.15)";
+      ctx.fillRect(x, y, rw, rh);
+      ctx.strokeStyle = "#e94560";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, rw, rh);
+    } else {
+      // 拖拽中：虚线边框
+      ctx.strokeStyle = "#e94560";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 3]);
+      ctx.strokeRect(x, y, rw, rh);
+      ctx.setLineDash([]);
+    }
+
+    // 显示坐标和尺寸
+    const origX = Math.min(startX, ex) / zoom;
+    const origY = Math.min(startY, ey) / zoom;
+    const origW = Math.abs(ex - startX) / zoom;
+    const origH = Math.abs(ey - startY) / zoom;
+    ctx.fillStyle = "rgba(233,69,96,0.85)";
+    ctx.font = "12px sans-serif";
+    const text = `(${Math.round(origX)},${Math.round(origY)}) ${Math.round(origW)}×${Math.round(origH)}px`;
+    const metrics = ctx.measureText(text);
+    ctx.fillRect(x, Math.max(y - 22, 0), metrics.width + 12, 22);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(text, x + 6, Math.max(y - 8, 14));
+  }
+
+  document.getElementById("zoomLabel").textContent = Math.round(zoom * 100) + "%";
+}
+
+// ============================================================
+//  鼠标交互
+// ============================================================
+canvas.addEventListener("mousedown", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  startX = e.clientX - rect.left;
+  startY = e.clientY - rect.top;
+  curX = startX; curY = startY;
+  selEndX = startX; selEndY = startY;
+  dragging = true;
+  hasSelection = false;
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  const rect = canvas.getBoundingClientRect();
+  curX = e.clientX - rect.left;
+  curY = e.clientY - rect.top;
+  render();
+});
+
+canvas.addEventListener("mouseup", () => {
+  if (!dragging) return;
+  dragging = false;
+  selEndX = curX;
+  selEndY = curY;
+  // 选区太小时视为放弃
+  if (Math.abs(curX - startX) < 5 && Math.abs(curY - startY) < 5) {
+    hasSelection = false;
+  } else {
+    hasSelection = true;
+  }
+  render();
+});
+
+// ============================================================
+//  滚轮缩放
+// ============================================================
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? -0.05 : 0.05;
+  zoom = Math.max(0.1, Math.min(3.0, zoom + delta));
+  render();
+});
+
+// ============================================================
+//  键盘确认 / 取消
+// ============================================================
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    window.close();
+  }
+  if (e.key === "Enter") {
+    if (!hasSelection && !dragging) {
+      alert("请先拖拽框选目标区域");
+      return;
+    }
+    // 使用已确认的选区坐标（松开鼠标后的最终值）
+    const endX = dragging ? curX : selEndX;
+    const endY = dragging ? curY : selEndY;
+    if (Math.abs(endX - startX) < 5 && Math.abs(endY - startY) < 5) {
+      alert("选区太小，请重新拖拽框选");
+      return;
+    }
+    const ox1 = Math.round(startX / zoom);
+    const oy1 = Math.round(startY / zoom);
+    const ox2 = Math.round(endX / zoom);
+    const oy2 = Math.round(endY / zoom);
+
+    // 把截图 + 坐标发回主窗口
+    const imageData = img ? img.src.split(",")[1] : "";
+    window.opener.postMessage({
+      type: "capture_result",
+      imageData: imageData,
+      x1: ox1, y1: oy1, x2: ox2, y2: oy2,
+    }, "*");
+    window.close();
+  }
+});
+
+// ============================================================
+//  启动
+// ============================================================
+window.addEventListener("load", () => {
+  document.title = "截取模板 — 拖拽框选目标区域";
+  loadScreenshot();
+});
+</script>
+</body>
+</html>

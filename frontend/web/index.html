@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>阴阳师自动点击 - 控制台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>⚡ 阴阳师自动点击</h1>
+  <nav class="tabs" id="tabNav">
+    <button class="tab active" data-tab="tabControl">📋 控制面板</button>
+    <button class="tab" data-tab="tabConfig">⚙ 参数配置</button>
+    <button class="tab" data-tab="tabTemplates">🎯 模板管理</button>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ==================== Tab 1: 控制面板 ==================== -->
+  <div class="tab-content active" id="tabControl">
+    <div class="section-header">
+      <span>Bot 实例</span>
+      <button id="btnAddInstance" class="btn btn-sm">＋ 添加窗口</button>
+    </div>
+    <div id="instancesContainer" class="instances-grid">
+      <!-- 动态生成 -->
+    </div>
+  </div>
+
+  <!-- ==================== Tab 2: 参数配置 ==================== -->
+  <div class="tab-content" id="tabConfig">
+    <div class="cfg-scroll">
+      <details class="cfg-group" open>
+        <summary>📁 屏幕 & 匹配</summary>
+        <div class="cfg-row">
+          <label>匹配阈值</label>
+          <input id="cfgThreshold" type="number" class="cfg-input cfg-num" min="0.1" max="1.0" step="0.05">
+          <span class="cfg-hint" title="cv2.matchTemplate 最低匹配分数。值越高越严格，越低越容易误识别">🛈</span>
+        </div>
+        <div class="cfg-row">
+          <label>识图缩放</label>
+          <input id="cfgDetectScale" type="number" class="cfg-input cfg-num" min="0.1" max="1.0" step="0.1">
+          <span class="cfg-hint" title="截屏后缩放到此比例再匹配。越小越快但越不精确。⚠ 不推荐修改">🛈 ⚠</span>
+        </div>
+        <div class="cfg-row">
+          <label>消抖帧数</label>
+          <input id="cfgMatchConfirm" type="number" class="cfg-input cfg-num" min="1" max="5" step="1">
+          <span class="cfg-hint" title="需连续 N 帧匹配到同一目标才触发点击。越大越稳定但响应越慢">🛈</span>
+        </div>
+      </details>
+
+      <details class="cfg-group" open>
+        <summary>🖱 鼠标 & 点击</summary>
+        <div class="cfg-row">
+          <label>移动速度(最小)</label>
+          <input id="cfgMouseMin" type="number" class="cfg-input cfg-num" min="100" max="10000" step="100">
+          <span class="cfg-hint" title="pyautogui 鼠标移动速度下限（像素/秒）">🛈</span>
+        </div>
+        <div class="cfg-row">
+          <label>移动速度(最大)</label>
+          <input id="cfgMouseMax" type="number" class="cfg-input cfg-num" min="100" max="10000" step="100">
+          <span class="cfg-hint" title="pyautogui 鼠标移动速度上限（像素/秒），实际速度在此区间随机">🛈</span>
+        </div>
+      </details>
+
+      <details class="cfg-group" open>
+        <summary>⚔ 战斗参数</summary>
+        <div class="cfg-row">
+          <label>每打N把休息</label>
+          <input id="cfgRestRounds" type="number" class="cfg-input cfg-num-sm" min="0" max="9999" step="1">
+          <span>±</span>
+          <input id="cfgRestRoundsVar" type="number" class="cfg-input cfg-num-sm" min="0" max="500" step="1">
+          <span class="cfg-hint" title="每打N把触发一次休息，±误差范围使每次休息间隔随机变化（设为0关闭休息）">🛈</span>
+        </div>
+        <div class="cfg-row">
+          <label>休息时长(秒)</label>
+          <input id="cfgRestSeconds" type="number" class="cfg-input cfg-num-sm" min="1" max="3600" step="1">
+          <span>±</span>
+          <input id="cfgRestSecondsVar" type="number" class="cfg-input cfg-num-sm" min="0" max="3600" step="1">
+          <span class="cfg-hint" title="每次休息的时长，±误差范围使每次休息时间随机变化">🛈</span>
+        </div>
+      </details>
+
+      <details class="cfg-group">
+        <summary>🖥 屏幕区域</summary>
+        <div class="cfg-row">
+          <label>X 范围</label>
+          <input id="cfgScrXmin" type="number" class="cfg-input cfg-num cfg-num-sm" min="0" max="7680" step="1" placeholder="Xmin">
+          <span>~</span>
+          <input id="cfgScrXmax" type="number" class="cfg-input cfg-num cfg-num-sm" min="0" max="7680" step="1" placeholder="Xmax">
+          <span class="cfg-hint" title="限定截屏区域 X 轴范围（像素），0 表示屏幕左边缘">🛈</span>
+        </div>
+        <div class="cfg-row">
+          <label>Y 范围</label>
+          <input id="cfgScrYmin" type="number" class="cfg-input cfg-num cfg-num-sm" min="0" max="4320" step="1" placeholder="Ymin">
+          <span>~</span>
+          <input id="cfgScrYmax" type="number" class="cfg-input cfg-num cfg-num-sm" min="0" max="4320" step="1" placeholder="Ymax">
+          <span class="cfg-hint" title="限定截屏区域 Y 轴范围（像素），0 表示屏幕顶部边缘">🛈</span>
+        </div>
+      </details>
+
+      <div class="cfg-actions">
+        <button id="btnSaveCfg" class="btn btn-primary">💾 保存全局配置</button>
+        <button id="btnResetCfg" class="btn">↩ 恢复默认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Tab 3: 模板管理 ==================== -->
+  <div class="tab-content" id="tabTemplates">
+    <div class="section-header">
+      <span>场景选择</span>
+      <div class="scene-actions">
+        <select id="selScene" class="cfg-input cfg-select"></select>
+        <button id="btnNewScene" class="btn btn-sm">＋ 新建场景</button>
+        <button id="btnDelScene" class="btn btn-sm btn-danger">🗑 删除场景</button>
+      </div>
+    </div>
+
+    <div class="templates-dual">
+      <!-- begin -->
+      <div class="tpl-col">
+        <h3>begin 模板</h3>
+        <div id="tplBegin" class="tpl-grid"></div>
+        <div class="tpl-actions">
+          <button class="btn btn-sm" onclick="startCapture('begin')">📷 截取模板</button>
+          <button class="btn btn-sm" onclick="importLocal('begin')">📁 导入本地</button>
+        </div>
+      </div>
+      <!-- end -->
+      <div class="tpl-col">
+        <h3>end 模板</h3>
+        <div id="tplEnd" class="tpl-grid"></div>
+        <div class="tpl-actions">
+          <button class="btn btn-sm" onclick="startCapture('end')">📷 截取模板</button>
+          <button class="btn btn-sm" onclick="importLocal('end')">📁 导入本地</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- 隐藏的文件上传 input -->
+<input type="file" id="fileImport" accept="image/*" style="display:none">
+
+<script type="text/javascript" src="/eel.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
