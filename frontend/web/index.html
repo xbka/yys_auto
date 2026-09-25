@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>阴阳师自动点击 - 控制台</title>
+  <title>痒痒鼠解放双手</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <header>
-  <h1>⚡ 阴阳师自动点击</h1>
+  <h1>痒痒鼠解放双手</h1>
   <nav class="tabs" id="tabNav">
     <button class="tab active" data-tab="tabControl">📋 控制面板</button>
     <button class="tab" data-tab="tabConfig">⚙ 参数配置</button>
@@ -82,6 +82,16 @@
           <input id="cfgRestSecondsVar" type="number" class="cfg-input cfg-num-sm" min="0" max="3600" step="1">
           <span class="cfg-hint" title="每次休息的时长，±误差范围使每次休息时间随机变化">🛈</span>
         </div>
+        <div class="cfg-row">
+          <label>连续未匹配上限</label>
+          <input id="cfgMissThreshold" type="number" class="cfg-input cfg-num-sm" min="5" max="200" step="5">
+          <span class="cfg-hint" title="连续 N 次未匹配到图片后，延时重试（最多3轮），减少无效扫描">🛈</span>
+        </div>
+        <div class="cfg-row">
+          <label>未匹配延时(秒)</label>
+          <input id="cfgMissRetrySleep" type="number" class="cfg-input cfg-num-sm" min="0.5" max="30" step="0.5">
+          <span class="cfg-hint" title="触发未匹配上限后的等待时间，避免频繁无效扫描">🛈</span>
+        </div>
       </details>
 
       <details class="cfg-group">
@@ -118,6 +128,25 @@
         <button id="btnNewScene" class="btn btn-sm">＋ 新建场景</button>
         <button id="btnDelScene" class="btn btn-sm btn-danger">🗑 删除场景</button>
       </div>
+    </div>
+
+    <!-- baseline 基准图 -->
+    <div class="baseline-card" id="baselineCard">
+      <div class="baseline-info">
+        <span>📐 窗口基准图：</span>
+        <span id="baselineStatus" class="baseline-status missing">未设置</span>
+        <span id="baselineSize" class="baseline-size"></span>
+      </div>
+      <div class="baseline-hint">
+        上传一张游戏窗口的完整截图作为「基准」。模板截图就是在这个窗口大小下截的，
+        运行时如果窗口大小变了，程序会自动缩放模板来适配。
+      </div>
+      <div class="baseline-actions">
+        <button id="btnCaptureBaseline" class="btn btn-sm">📷 截取全屏</button>
+        <span class="baseline-or">或</span>
+        <button id="btnImportBaseline" class="btn btn-sm">📁 导入本地</button>
+      </div>
+      <input type="file" id="baselineImportInput" accept="image/*" style="display:none">
     </div>
 
     <div class="templates-dual">

@@ -14,8 +14,8 @@ from pathlib import Path
 
 import eel
 
-# 把项目根目录加入 path
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 项目根目录（本文件所在目录），加入 path 以便导入 frontend / autoclick
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
 # PyInstaller 打包后的路径处理
@@ -73,6 +73,8 @@ def _default_config() -> dict:
         "mouse_speed_max": 2500,
         "match_confirm_count": 2,
         "detection_scale": 0.5,
+        "miss_threshold": 20,
+        "miss_retry_sleep": 2.0,
         "screen": {"xmin": 0, "xmax": 1920, "ymin": 0, "ymax": 1080},
         "instances": [
             {
@@ -389,6 +391,32 @@ def screenshot_screen():
     img.save(buf, format="PNG")
     data = base64.b64encode(buf.getvalue()).decode()
     return {"width": img.width, "height": img.height, "data": data}
+
+
+@eel.expose
+def check_baseline(scene: str):
+    """检查场景是否有 baseline.png，返回是否存在及其分辨率"""
+    path = os.path.join(_templates_root, scene, "baseline.png")
+    if os.path.isfile(path):
+        from PIL import Image
+        try:
+            img = Image.open(path)
+            w, h = img.size
+            return {"exists": True, "width": w, "height": h}
+        except Exception:
+            return {"exists": True, "width": 0, "height": 0}
+    return {"exists": False, "width": 0, "height": 0}
+
+
+@eel.expose
+def save_baseline(scene: str, image_data: str):
+    """保存整张截图为 baseline.png"""
+    from PIL import Image
+    path = os.path.join(_templates_root, scene, "baseline.png")
+    raw = base64.b64decode(image_data)
+    img = Image.open(io.BytesIO(raw))
+    img.save(path, "PNG")
+    return {"ok": True, "msg": "基准图已保存", "width": img.width, "height": img.height}
 
 
 # ============================================================

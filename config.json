@@ -10,6 +10,8 @@
   "mouse_speed_max": 3000,
   "match_confirm_count": 2,
   "detection_scale": 0.5,
+  "miss_threshold": 20,
+  "miss_retry_sleep": 2.0,
   "screen": {
     "xmin": 0,
     "xmax": 1920,
@@ -19,9 +21,9 @@
   "instances": [
     {
       "id": "window-1",
-      "name": "小白",
-      "window_title": "小白",
-      "template_scene": "chi",
+      "name": "bot1",
+      "window_title": "",
+      "template_scene": "999",
       "screen": {
         "xmin": 0,
         "xmax": 1920,

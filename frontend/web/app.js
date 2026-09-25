@@ -132,11 +132,20 @@ async function pollStatus() {
         }
       }
 
-      // 更新日志
+      // 更新日志（在点击图下面）
       const logEl = card.querySelector(".inst-log");
-      if (logEl && st.log_lines && st.log_lines.length > 0) {
-        logEl.textContent = st.log_lines.slice(-40).join("\n");
-        logEl.scrollTop = logEl.scrollHeight;
+      if (logEl) {
+        const lines = st.log_lines || [];
+        if (lines.length > 0) {
+          // 只有用户没有手动上滚时，才自动滚到底部
+          const wasAtBottom = (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight) < 30;
+          logEl.textContent = lines.slice(-50).join("\n");
+          if (wasAtBottom) {
+            logEl.scrollTop = logEl.scrollHeight;
+          }
+        } else {
+          logEl.innerHTML = '<span class="inst-log-empty">暂无日志</span>';
+        }
       }
 
       // 重绘按钮（根据新状态）
@@ -192,13 +201,13 @@ function instanceCardHTML(inst) {
     <div class="inst-stat"><div class="stat-label">预计剩余</div><div class="stat-value stat-eta">--</div></div>
   </div>
   <canvas class="inst-chart" data-inst-id="${escHtml(inst.id)}"></canvas>
+  <div class="inst-log"><span class="inst-log-empty">暂无日志</span></div>
   <div class="inst-btns" id="btns-${escHtml(inst.id)}">
     <button class="btn btn-start btn-sm inst-start" data-inst-id="${escHtml(inst.id)}">▶ 开始</button>
     <button class="btn btn-pause btn-sm inst-pause" data-inst-id="${escHtml(inst.id)}">⏸ 暂停</button>
     <button class="btn btn-stop btn-sm inst-stop" data-inst-id="${escHtml(inst.id)}">⏹ 停止</button>
     <button class="btn btn-sm inst-remove" data-inst-id="${escHtml(inst.id)}">✕</button>
   </div>
-  <div class="inst-log"></div>
 </div>`;
 }
 
@@ -364,6 +373,8 @@ function loadGlobalConfigToForm(cfg) {
   setVal("cfgRestRoundsVar", cfg.rest_rounds_var ?? 10);
   setVal("cfgRestSeconds", cfg.rest_seconds ?? 30);
   setVal("cfgRestSecondsVar", cfg.rest_seconds_var ?? 5);
+  setVal("cfgMissThreshold", cfg.miss_threshold ?? 20);
+  setVal("cfgMissRetrySleep", cfg.miss_retry_sleep ?? 2.0);
   const s = cfg.screen || {};
   setVal("cfgScrXmin", s.xmin ?? 0);
   setVal("cfgScrXmax", s.xmax ?? 1920);
@@ -421,6 +432,8 @@ document.getElementById("btnSaveCfg").addEventListener("click", async () => {
   c.rest_rounds_var  = parseInt(document.getElementById("cfgRestRoundsVar").value)  || 10;
   c.rest_seconds     = parseInt(document.getElementById("cfgRestSeconds").value)     || 30;
   c.rest_seconds_var = parseInt(document.getElementById("cfgRestSecondsVar").value)  || 5;
+  c.miss_threshold   = parseInt(document.getElementById("cfgMissThreshold").value)   || 20;
+  c.miss_retry_sleep = parseFloat(document.getElementById("cfgMissRetrySleep").value) || 2.0;
   c.screen = {
     xmin: parseInt(document.getElementById("cfgScrXmin").value) || 0,
     xmax: parseInt(document.getElementById("cfgScrXmax").value) || 1920,
@@ -461,8 +474,10 @@ function populateSceneSelector(scenes, current) {
   ).join("");
   if (scenes.length === 0) {
     sel.innerHTML = '<option value="">-- 无场景 --</option>';
+    _currentScene = "";
   }
   if (_currentScene) loadTemplates(_currentScene);
+  else updateBaselineUI("");
 }
 
 document.getElementById("selScene")?.addEventListener("change", function() {
@@ -505,6 +520,7 @@ async function loadTemplates(scene) {
   } catch (e) {
     console.error("loadTemplates error:", e);
   }
+  updateBaselineUI(scene);
 }
 
 function renderTemplateCards(containerId, items, ttype, scene) {
@@ -597,6 +613,79 @@ document.getElementById("fileImport").addEventListener("change", async function(
     })();
     if (r.ok) loadTemplates(_currentScene);
     else alert("导入失败：" + r.msg);
+  };
+  reader.readAsDataURL(file);
+  this.value = "";
+});
+
+// ============================================================
+//  baseline 基准图
+// ============================================================
+async function updateBaselineUI(scene) {
+  const card = document.getElementById("baselineCard");
+  if (!card) return;
+  if (!scene) {
+    card.style.display = "none";
+    return;
+  }
+  card.style.display = "";
+  try {
+    const r = await eel.check_baseline(scene)();
+    const statusEl = document.getElementById("baselineStatus");
+    const sizeEl = document.getElementById("baselineSize");
+    if (!statusEl) return;
+    if (r.exists) {
+      statusEl.textContent = "已设置";
+      statusEl.className = "baseline-status ready";
+      sizeEl.textContent = `${r.width} × ${r.height}`;
+    } else {
+      statusEl.textContent = "未设置";
+      statusEl.className = "baseline-status missing";
+      sizeEl.textContent = "";
+    }
+  } catch (e) {
+    console.error("checkBaseline error:", e);
+  }
+}
+
+// 截取基准图（全屏截图，不需要裁剪）
+async function captureBaseline() {
+  if (!_currentScene) { alert("请先选择场景"); return; }
+  await eel.minimize_self();
+  await new Promise(r => setTimeout(r, 600));
+  try {
+    const r = await eel.screenshot_screen()();
+    const result = await eel.save_baseline(_currentScene, r.data)();
+    if (result.ok) {
+      updateBaselineUI(_currentScene);
+    } else {
+      alert("保存失败：" + result.msg);
+    }
+  } catch (e) {
+    alert("截取失败：" + e);
+  }
+}
+
+document.getElementById("btnCaptureBaseline")?.addEventListener("click", captureBaseline);
+
+document.getElementById("btnImportBaseline")?.addEventListener("click", () => {
+  if (!_currentScene) { alert("请先选择场景"); return; }
+  document.getElementById("baselineImportInput").click();
+});
+
+document.getElementById("baselineImportInput")?.addEventListener("change", async function() {
+  const file = this.files[0];
+  if (!file || !_currentScene) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const raw = reader.result;
+    const b64 = raw.split(",")[1];
+    const r = await eel.save_baseline(_currentScene, b64)();
+    if (r.ok) {
+      updateBaselineUI(_currentScene);
+    } else {
+      alert("导入失败：" + r.msg);
+    }
   };
   reader.readAsDataURL(file);
   this.value = "";

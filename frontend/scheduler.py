@@ -11,7 +11,7 @@ import json
 import logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from autoclick_0709 import AutoClickerBot, MouseController, MouseWorker, POISON_PILL
+from autoclick import AutoClickerBot, MouseController, MouseWorker, POISON_PILL
 
 logger = logging.getLogger("yys.system")
 
@@ -104,6 +104,8 @@ class BotInstance:
                 mouse_speed_max=instance_cfg.get("mouse_speed_max", g.get("mouse_speed_max", 2500)),
                 match_confirm_count=instance_cfg.get("match_confirm_count", g.get("match_confirm_count", 2)),
                 detection_scale=instance_cfg.get("detection_scale", g.get("detection_scale", 0.5)),
+                miss_threshold=instance_cfg.get("miss_threshold", g.get("miss_threshold", 20)),
+                miss_retry_sleep=instance_cfg.get("miss_retry_sleep", g.get("miss_retry_sleep", 2.0)),
                 rest_rounds=g.get("rest_rounds", 50),
                 rest_rounds_var=g.get("rest_rounds_var", 10),
                 rest_seconds=g.get("rest_seconds", 30),
@@ -130,6 +132,8 @@ class BotInstance:
             self._state = "stopping"
             self._stop_event.set()
             self._pause_event.clear()
+            if self._bot:
+                self._bot.stop_requested = True  # 防止 stop_event 清除后 status 误判为 running
             return {"ok": True, "msg": f"[{self.instance_id}] 正在停止..."}
 
     def pause(self):
