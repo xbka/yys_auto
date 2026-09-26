@@ -70,10 +70,30 @@ class BotInstance:
     # ------------------------------------------------------------------
     def start(self, instance_cfg: dict):
         """创建 Bot 并启动线程"""
+        # 已在运行的实例：running 拒绝；paused 直接恢复（保留已累计的统计，不重建 Bot）
         with self._lock:
             if self._state == "running":
                 return {"ok": False, "msg": f"[{self.instance_id}] 已在运行中"}
+            if self._state == "paused":
+                if self._bot is not None:
+                    self._bot.stop_requested = False
+                self._pause_event.clear()
+                self._state = "running"
+                logger.info(f"[{self.instance_id}] 已恢复运行（保留统计）")
+                return {"ok": True, "msg": f"[{self.instance_id}] 已恢复"}
+            if self._state == "stopping":
+                return {"ok": False, "msg": f"[{self.instance_id}] 正在停止，请稍候"}
+            pending_thread = self._thread
 
+        # 回收上一轮的线程。必须在锁外 join：_run_wrapper 的 finally 也要拿这把锁，
+        # 持锁等待会互相死锁。这样能避免新旧两个线程同时操作同一个游戏窗口。
+        if pending_thread is not None and pending_thread.is_alive():
+            pending_thread.join(timeout=3.0)
+            if pending_thread.is_alive():
+                return {"ok": False,
+                        "msg": f"[{self.instance_id}] 上一轮尚未退出，请稍后再试"}
+
+        with self._lock:
             self._stop_event.clear()
             self._pause_event.clear()
             self._instance_config = instance_cfg
@@ -100,12 +120,13 @@ class BotInstance:
                 limit=int(instance_cfg.get("limit", g.get("limit", 200))),
                 screen=screen_tuple,
                 threshold=instance_cfg.get("threshold", g.get("threshold", 0.75)),
-                mouse_speed_min=instance_cfg.get("mouse_speed_min", g.get("mouse_speed_min", 2000)),
-                mouse_speed_max=instance_cfg.get("mouse_speed_max", g.get("mouse_speed_max", 2500)),
+                mouse_speed_min=instance_cfg.get("mouse_speed_min", g.get("mouse_speed_min", 2750)),
+                mouse_speed_max=instance_cfg.get("mouse_speed_max", g.get("mouse_speed_max", 3250)),
                 match_confirm_count=instance_cfg.get("match_confirm_count", g.get("match_confirm_count", 2)),
                 detection_scale=instance_cfg.get("detection_scale", g.get("detection_scale", 0.5)),
                 miss_threshold=instance_cfg.get("miss_threshold", g.get("miss_threshold", 20)),
                 miss_retry_sleep=instance_cfg.get("miss_retry_sleep", g.get("miss_retry_sleep", 2.0)),
+                same_stage_click_limit=g.get("same_stage_click_limit", 10),
                 rest_rounds=g.get("rest_rounds", 50),
                 rest_rounds_var=g.get("rest_rounds_var", 10),
                 rest_seconds=g.get("rest_seconds", 30),
@@ -266,6 +287,23 @@ class BotManager:
         if inst is None:
             return {"ok": False, "msg": f"实例 [{instance_id}] 不存在"}
         return inst.resume()
+
+    def toggle(self, instance_id: str, config: dict):
+        """
+        单按钮切换：空闲→启动，运行中→暂停，已暂停→继续。
+        stopping 期间拒绝操作，避免与正在退出的线程抢状态。
+        """
+        inst = self._instances.get(instance_id)
+        if inst is None:
+            return {"ok": False, "msg": f"实例 [{instance_id}] 不存在"}
+        state = inst.state
+        if state == "idle":
+            return inst.start(config)
+        if state == "running":
+            return inst.pause()
+        if state == "paused":
+            return inst.resume()
+        return {"ok": False, "msg": f"[{instance_id}] 正在停止中，请稍候"}
 
     # ------------------------------------------------------------------
     #  状态轮询

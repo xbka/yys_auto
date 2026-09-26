@@ -203,8 +203,7 @@ function instanceCardHTML(inst) {
   <canvas class="inst-chart" data-inst-id="${escHtml(inst.id)}"></canvas>
   <div class="inst-log"><span class="inst-log-empty">暂无日志</span></div>
   <div class="inst-btns" id="btns-${escHtml(inst.id)}">
-    <button class="btn btn-start btn-sm inst-start" data-inst-id="${escHtml(inst.id)}">▶ 开始</button>
-    <button class="btn btn-pause btn-sm inst-pause" data-inst-id="${escHtml(inst.id)}">⏸ 暂停</button>
+    <button class="btn btn-start btn-sm inst-primary" data-inst-id="${escHtml(inst.id)}">▶ 开始</button>
     <button class="btn btn-stop btn-sm inst-stop" data-inst-id="${escHtml(inst.id)}">⏹ 停止</button>
     <button class="btn btn-sm inst-remove" data-inst-id="${escHtml(inst.id)}">✕</button>
   </div>
@@ -212,17 +211,12 @@ function instanceCardHTML(inst) {
 }
 
 function bindCardEvents(instanceId) {
-  // 开始按钮
-  document.querySelector(`.inst-start[data-inst-id="${instanceId}"]`)?.addEventListener("click", () => {
-    // 先保存该实例配置到全局
-    saveSingleInstanceConfig(instanceId);
-    // 延迟再启动（等配置保存完）
-    setTimeout(() => startBotInstance(instanceId), 100);
-  });
-
-  // 暂停
-  document.querySelector(`.inst-pause[data-inst-id="${instanceId}"]`)?.addEventListener("click", () => {
-    eel.pause_bot(instanceId);
+  // 主按钮：开始 / 暂停 / 继续 三合一。
+  // 不依赖前端缓存的状态，交给后端 toggle_bot 按实例真实状态分派，避免状态不同步。
+  document.querySelector(`.inst-primary[data-inst-id="${instanceId}"]`)?.addEventListener("click", async () => {
+    await saveSingleInstanceConfig(instanceId);   // 先把窗口/场景/次数写入配置
+    const r = await eel.toggle_bot(instanceId)();
+    if (r && !r.ok) alert(r.msg);
   });
 
   // 停止
@@ -287,38 +281,27 @@ function bindCardEvents(instanceId) {
 function refreshInstanceButtons(instanceId, state) {
   const btns = document.getElementById("btns-" + instanceId);
   if (!btns) return;
-  const start  = btns.querySelector(".inst-start");
-  const pause  = btns.querySelector(".inst-pause");
-  const stop   = btns.querySelector(".inst-stop");
-  const remove = btns.querySelector(".inst-remove");
+  const primary = btns.querySelector(".inst-primary");
+  const stop    = btns.querySelector(".inst-stop");
+  const remove  = btns.querySelector(".inst-remove");
 
-  if (state === "idle") {
-    if (start) { start.style.display = "inline-block"; start.textContent = "▶ 开始"; }
-    if (pause) pause.style.display = "none";
-    if (stop) stop.style.display = "none";
-    if (remove) remove.style.display = "inline-block";
-  } else if (state === "running") {
-    if (start) start.style.display = "none";
-    if (pause) pause.style.display = "inline-block";
-    if (stop) stop.style.display = "inline-block";
-    if (remove) remove.style.display = "none";
-  } else if (state === "paused") {
-    if (start) { start.style.display = "inline-block"; start.textContent = "🔄 继续"; }
-    if (pause) pause.style.display = "none";
-    if (stop) stop.style.display = "inline-block";
-    if (remove) remove.style.display = "none";
-  } else {
-    // stopping
-    if (start) start.style.display = "none";
-    if (pause) pause.style.display = "none";
-    if (stop) stop.style.display = "inline-block";
-    if (remove) remove.style.display = "none";
+  // 主按钮一个顶三个：空闲→开始，运行中→暂停，已暂停→继续，停止中→禁用
+  const PRIMARY = {
+    idle:     { text: "▶ 开始",  cls: "btn-start",  disabled: false },
+    running:  { text: "⏸ 暂停",  cls: "btn-pause",  disabled: false },
+    paused:   { text: "🔄 继续", cls: "btn-resume", disabled: false },
+    stopping: { text: "⏳ 停止中", cls: "btn-pause", disabled: true  },
+  }[state] || { text: "▶ 开始", cls: "btn-start", disabled: false };
+
+  if (primary) {
+    primary.textContent = PRIMARY.text;
+    primary.className   = "btn btn-sm inst-primary " + PRIMARY.cls;
+    primary.disabled    = PRIMARY.disabled;
   }
-}
 
-async function startBotInstance(instanceId) {
-  const r = await eel.start_bot(instanceId)();
-  if (!r.ok) alert(r.msg);
+  const show = (el, visible) => { if (el) el.style.display = visible ? "inline-block" : "none"; };
+  show(stop,   state !== "idle");   // 只要不是空闲，都可以点停止
+  show(remove, state === "idle");   // 仅在空闲时允许删除实例
 }
 
 // ============================================================
@@ -367,14 +350,15 @@ function loadGlobalConfigToForm(cfg) {
   setVal("cfgThreshold", cfg.threshold ?? 0.75);
   setVal("cfgDetectScale", cfg.detection_scale ?? 0.5);
   setVal("cfgMatchConfirm", cfg.match_confirm_count ?? 2);
-  setVal("cfgMouseMin", cfg.mouse_speed_min ?? 2000);
-  setVal("cfgMouseMax", cfg.mouse_speed_max ?? 2500);
+  setVal("cfgMouseMin", cfg.mouse_speed_min ?? 2750);
+  setVal("cfgMouseMax", cfg.mouse_speed_max ?? 3250);
   setVal("cfgRestRounds", cfg.rest_rounds ?? 50);
   setVal("cfgRestRoundsVar", cfg.rest_rounds_var ?? 10);
   setVal("cfgRestSeconds", cfg.rest_seconds ?? 30);
   setVal("cfgRestSecondsVar", cfg.rest_seconds_var ?? 5);
   setVal("cfgMissThreshold", cfg.miss_threshold ?? 20);
   setVal("cfgMissRetrySleep", cfg.miss_retry_sleep ?? 2.0);
+  setVal("cfgSameStageLimit", cfg.same_stage_click_limit ?? 10);
   const s = cfg.screen || {};
   setVal("cfgScrXmin", s.xmin ?? 0);
   setVal("cfgScrXmax", s.xmax ?? 1920);
@@ -426,14 +410,17 @@ document.getElementById("btnSaveCfg").addEventListener("click", async () => {
   c.threshold     = parseFloat(document.getElementById("cfgThreshold").value)     || 0.75;
   c.detection_scale = parseFloat(document.getElementById("cfgDetectScale").value) || 0.5;
   c.match_confirm_count = parseInt(document.getElementById("cfgMatchConfirm").value) || 2;
-  c.mouse_speed_min  = parseInt(document.getElementById("cfgMouseMin").value)  || 2000;
-  c.mouse_speed_max  = parseInt(document.getElementById("cfgMouseMax").value)  || 2500;
+  c.mouse_speed_min  = parseInt(document.getElementById("cfgMouseMin").value)  || 2750;
+  c.mouse_speed_max  = parseInt(document.getElementById("cfgMouseMax").value)  || 3250;
   c.rest_rounds      = parseInt(document.getElementById("cfgRestRounds").value)    || 50;
   c.rest_rounds_var  = parseInt(document.getElementById("cfgRestRoundsVar").value)  || 10;
   c.rest_seconds     = parseInt(document.getElementById("cfgRestSeconds").value)     || 30;
   c.rest_seconds_var = parseInt(document.getElementById("cfgRestSecondsVar").value)  || 5;
   c.miss_threshold   = parseInt(document.getElementById("cfgMissThreshold").value)   || 20;
   c.miss_retry_sleep = parseFloat(document.getElementById("cfgMissRetrySleep").value) || 2.0;
+  // 0 表示关闭该保护，所以不能用 || 兜底
+  c.same_stage_click_limit = parseInt(document.getElementById("cfgSameStageLimit").value);
+  if (isNaN(c.same_stage_click_limit)) c.same_stage_click_limit = 10;
   c.screen = {
     xmin: parseInt(document.getElementById("cfgScrXmin").value) || 0,
     xmax: parseInt(document.getElementById("cfgScrXmax").value) || 1920,
@@ -623,29 +610,34 @@ document.getElementById("fileImport").addEventListener("change", async function(
 // ============================================================
 async function updateBaselineUI(scene) {
   const card = document.getElementById("baselineCard");
+  const flagCard = document.getElementById("flagCard");
   if (!card) return;
   if (!scene) {
     card.style.display = "none";
+    if (flagCard) flagCard.style.display = "none";
     return;
   }
   card.style.display = "";
+  if (flagCard) flagCard.style.display = "";
   try {
     const r = await eel.check_baseline(scene)();
     const statusEl = document.getElementById("baselineStatus");
     const sizeEl = document.getElementById("baselineSize");
-    if (!statusEl) return;
-    if (r.exists) {
-      statusEl.textContent = "已设置";
-      statusEl.className = "baseline-status ready";
-      sizeEl.textContent = `${r.width} × ${r.height}`;
-    } else {
-      statusEl.textContent = "未设置";
-      statusEl.className = "baseline-status missing";
-      sizeEl.textContent = "";
+    if (statusEl) {
+      if (r.exists) {
+        statusEl.textContent = "已设置";
+        statusEl.className = "baseline-status ready";
+        sizeEl.textContent = `${r.width} × ${r.height}`;
+      } else {
+        statusEl.textContent = "未设置";
+        statusEl.className = "baseline-status missing";
+        sizeEl.textContent = "";
+      }
     }
   } catch (e) {
     console.error("checkBaseline error:", e);
   }
+  updateFlagUI(scene);
 }
 
 // 截取基准图（全屏截图，不需要裁剪）
@@ -692,6 +684,79 @@ document.getElementById("baselineImportInput")?.addEventListener("change", async
 });
 
 // ============================================================
+//  阶段标志（旗帜）
+// ============================================================
+async function updateFlagUI(scene) {
+  if (!scene) return;
+  let flags = null;
+  try {
+    flags = await eel.check_flags(scene)();
+  } catch (e) {
+    console.error("checkFlags error:", e);
+  }
+  renderFlagStatus("flagBeginStatus", "begin", flags && flags.begin);
+  renderFlagStatus("flagEndStatus", "end", flags && flags.end);
+}
+
+function renderFlagStatus(elId, label, status) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (status && status.exists) {
+    el.textContent = `${label} 已设置 ${status.width}×${status.height}`;
+    el.className = "baseline-status ready";
+  } else {
+    el.textContent = `${label} 未设置`;
+    el.className = "baseline-status missing";
+  }
+}
+
+let _flagImportType = "begin";
+
+document.getElementById("btnImportFlagBegin")?.addEventListener("click", () => {
+  if (!_currentScene) { alert("请先选择场景"); return; }
+  _flagImportType = "begin";
+  document.getElementById("flagImportInput").click();
+});
+
+document.getElementById("btnImportFlagEnd")?.addEventListener("click", () => {
+  if (!_currentScene) { alert("请先选择场景"); return; }
+  _flagImportType = "end";
+  document.getElementById("flagImportInput").click();
+});
+
+document.getElementById("flagImportInput")?.addEventListener("change", async function() {
+  const file = this.files[0];
+  if (!file || !_currentScene) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const b64 = String(reader.result).split(",")[1];
+    const r = await eel.import_flag(_currentScene, _flagImportType, { data: b64 })();
+    if (r.ok) updateFlagUI(_currentScene);
+    else alert("导入失败：" + r.msg);
+  };
+  reader.readAsDataURL(file);
+  this.value = "";
+});
+
+// ============================================================
+//  生成初始占位图
+// ============================================================
+async function makePlaceholder(kind) {
+  if (!_currentScene) { alert("请先选择场景"); return; }
+  const what = kind === "baseline" ? "baseline.png" : "begin.png / end.png";
+  if (!confirm(`将生成初始占位图（${what}），会覆盖当前已上传的同名素材。\n\n确定继续？`)) return;
+  const r = await eel.make_placeholder(_currentScene, kind)();
+  if (r.ok) {
+    if (kind === "baseline") updateBaselineUI(_currentScene);
+    else updateFlagUI(_currentScene);
+  }
+  alert(r.msg);
+}
+
+document.getElementById("btnMakeBaselineHolder")?.addEventListener("click", () => makePlaceholder("baseline"));
+document.getElementById("btnMakeFlagHolder")?.addEventListener("click", () => makePlaceholder("flag"));
+
+// ============================================================
 //  工具函数
 // ============================================================
 function setVal(id, val) {
@@ -730,10 +795,9 @@ function drawClickChart(canvas, positions, windowRect) {
   ctx.fillRect(0, 0, w, h);
 
   // 窗口尺寸 → 绘图区域保持与游戏窗口相同宽高比
+  // （点击点已是窗口内相对坐标，不再需要窗口左上角位置）
   const winW = (windowRect && windowRect[2]) || 1920;
   const winH = (windowRect && windowRect[3]) || 1080;
-  const winLeft = (windowRect && windowRect[0]) || 0;
-  const winTop  = (windowRect && windowRect[1]) || 0;
 
   const pad = 12;
   const availW = w - pad * 2;
@@ -777,9 +841,9 @@ function drawClickChart(canvas, positions, windowRect) {
     ctx.fillStyle = layer.color;
     for (const item of positions) {
       if (item[0] !== layer.cls) continue;
-      // 转换为窗口内相对坐标
-      const relX = item[1] - winLeft;
-      const relY = item[2] - winTop;
+      // 坐标已是窗口内相对坐标（后端记录时已扣除窗口位置）
+      const relX = item[1];
+      const relY = item[2];
       const px = offX + (relX / winW) * plotW;
       const py = offY + (relY / winH) * plotH;
       // 边界裁剪（窗口边缘可能超出截图区域）

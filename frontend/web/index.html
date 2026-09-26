@@ -92,6 +92,11 @@
           <input id="cfgMissRetrySleep" type="number" class="cfg-input cfg-num-sm" min="0.5" max="30" step="0.5">
           <span class="cfg-hint" title="触发未匹配上限后的等待时间，避免频繁无效扫描">🛈</span>
         </div>
+        <div class="cfg-row">
+          <label>同阶段点击上限</label>
+          <input id="cfgSameStageLimit" type="number" class="cfg-input cfg-num-sm" min="0" max="100" step="1">
+          <span class="cfg-hint" title="连续 N 次点击同一阶段后界面仍无变化，判定为被遮挡或点击失效，自动停止运行（0 = 关闭该保护）">🛈</span>
+        </div>
       </details>
 
       <details class="cfg-group">
@@ -130,23 +135,46 @@
       </div>
     </div>
 
-    <!-- baseline 基准图 -->
-    <div class="baseline-card" id="baselineCard">
-      <div class="baseline-info">
-        <span>📐 窗口基准图：</span>
-        <span id="baselineStatus" class="baseline-status missing">未设置</span>
-        <span id="baselineSize" class="baseline-size"></span>
+    <!-- 素材区：基准图 + 阶段标志 并排 -->
+    <div class="material-row">
+      <!-- baseline 基准图 -->
+      <div class="baseline-card" id="baselineCard">
+        <div class="baseline-info">
+          <span>📐 窗口基准图：</span>
+          <span id="baselineStatus" class="baseline-status missing">未设置</span>
+          <span id="baselineSize" class="baseline-size"></span>
+        </div>
+        <div class="baseline-hint">
+          上传一张游戏窗口的完整截图作为「基准」。模板截图就是在这个窗口大小下截的，
+          运行时如果窗口大小变了，程序会自动缩放模板来适配。
+        </div>
+        <div class="baseline-actions">
+          <button id="btnImportBaseline" class="btn btn-sm">📁 导入本地</button>
+          <button id="btnCaptureBaseline" class="btn btn-sm">📷 截取全屏</button>
+          <button id="btnMakeBaselineHolder" class="btn btn-sm">🧩 生成初始占位图</button>
+        </div>
+        <input type="file" id="baselineImportInput" accept="image/*" style="display:none">
       </div>
-      <div class="baseline-hint">
-        上传一张游戏窗口的完整截图作为「基准」。模板截图就是在这个窗口大小下截的，
-        运行时如果窗口大小变了，程序会自动缩放模板来适配。
+
+      <!-- 阶段标志（旗帜） -->
+      <div class="baseline-card" id="flagCard">
+        <div class="baseline-info">
+          <span>🚩 阶段标志：</span>
+          <span id="flagBeginStatus" class="baseline-status missing">begin 未设置</span>
+          <span id="flagEndStatus" class="baseline-status missing">end 未设置</span>
+        </div>
+        <div class="baseline-hint">
+          每个阶段上传一张<b>该阶段独有</b>的界面特征图（不是按钮图）。运行时程序只匹配这两张图来判断当前处于哪个阶段，
+          识别开销与模板数量无关。<br>
+          要求：begin 期间它一定在、end 期间它一定不在，反之亦然。<b>两张都设置</b>后才会启用快速识别，缺任一张则自动退回全图扫描。
+        </div>
+        <div class="baseline-actions">
+          <button id="btnImportFlagBegin" class="btn btn-sm">📁 导入 begin 标志</button>
+          <button id="btnImportFlagEnd" class="btn btn-sm">📁 导入 end 标志</button>
+          <button id="btnMakeFlagHolder" class="btn btn-sm">🧩 生成初始占位图</button>
+        </div>
+        <input type="file" id="flagImportInput" accept="image/*" style="display:none">
       </div>
-      <div class="baseline-actions">
-        <button id="btnCaptureBaseline" class="btn btn-sm">📷 截取全屏</button>
-        <span class="baseline-or">或</span>
-        <button id="btnImportBaseline" class="btn btn-sm">📁 导入本地</button>
-      </div>
-      <input type="file" id="baselineImportInput" accept="image/*" style="display:none">
     </div>
 
     <div class="templates-dual">

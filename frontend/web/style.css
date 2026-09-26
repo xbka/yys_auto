@@ -166,8 +166,10 @@ header h1 { font-size: 18px; font-weight: 700; white-space: nowrap; }
 }
 .btn:hover { filter: brightness(1.15); }
 .btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
 .btn-primary { background: var(--accent2); color: #fff; }
 .btn-start { background: var(--green); color: #111; }
+.btn-resume { background: var(--accent2); color: #fff; }
 .btn-pause { background: #f59e0b; color: #111; }
 .btn-stop { background: var(--red); color: #fff; }
 .btn-danger { background: #991b1b; color: #fff; }
@@ -227,6 +229,14 @@ header h1 { font-size: 18px; font-weight: 700; white-space: nowrap; }
   padding: 6px 12px; font-size: 13px; min-width: 140px; font-family: inherit;
 }
 
+/* 素材区：基准图 + 阶段标志 左右并排 */
+.material-row {
+  display: flex; gap: var(--gap); margin-top: var(--gap); align-items: stretch;
+}
+.material-row > .baseline-card {
+  flex: 1 1 0; min-width: 0; margin-top: 0;   /* 间距由 .material-row 统一提供 */
+}
+
 /* baseline 基准图卡片 */
 .baseline-card {
   margin-top: var(--gap);
@@ -237,7 +247,7 @@ header h1 { font-size: 18px; font-weight: 700; white-space: nowrap; }
 }
 .baseline-info {
   display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
-  font-size: 14px; font-weight: 600;
+  font-size: 14px; font-weight: 600; flex-wrap: wrap;
 }
 .baseline-status {
   padding: 2px 10px; border-radius: 10px; font-size: 12px; font-weight: 600;
@@ -249,7 +259,7 @@ header h1 { font-size: 18px; font-weight: 700; white-space: nowrap; }
   font-size: 12px; color: var(--text-dim); line-height: 1.6; margin-bottom: 10px;
 }
 .baseline-actions {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 .baseline-or { font-size: 12px; color: var(--text-dim); }
 

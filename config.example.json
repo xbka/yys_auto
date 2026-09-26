@@ -1,17 +1,18 @@
 {
-  "_comment": "阴阳师自动点击脚本 — 全局 + 多实例配置",
+  "_comment": "痒痒鼠解放双手 — 配置样例。本文件随仓库分发；你的实际配置保存在 config.json（不入库，首次运行会自动从本文件复制生成）。",
   "threshold": 0.75,
   "limit": 200,
   "rest_rounds": 50,
   "rest_rounds_var": 10,
   "rest_seconds": 30,
   "rest_seconds_var": 5,
-  "mouse_speed_min": 2500,
-  "mouse_speed_max": 3000,
+  "mouse_speed_min": 2750,
+  "mouse_speed_max": 3250,
   "match_confirm_count": 2,
   "detection_scale": 0.5,
   "miss_threshold": 20,
   "miss_retry_sleep": 2.0,
+  "same_stage_click_limit": 10,
   "screen": {
     "xmin": 0,
     "xmax": 1920,
@@ -23,14 +24,14 @@
       "id": "window-1",
       "name": "bot1",
       "window_title": "",
-      "template_scene": "999",
+      "template_scene": "",
       "screen": {
         "xmin": 0,
         "xmax": 1920,
         "ymin": 0,
         "ymax": 1080
       },
-      "limit": 10
+      "limit": 100
     }
   ],
   "log_dir": "logs"

@@ -19,7 +19,10 @@ env/
 # ---- 打包产物（通过 Release 单独分发）----
 build/
 dist/
-../yys_auto_dist/
+../yys_auto_app/
+
+# ---- 本地配置（含窗口名等本机信息，不纳入版本管理；样例见 config.example.json）----
+/config.json
 
 # ---- 模板截图（体积大，通过 Release 单独分发，不纳入版本管理）----
 templates/

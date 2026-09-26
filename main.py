@@ -42,8 +42,10 @@ os.makedirs(_templates_root, exist_ok=True)
 
 
 def _load_config():
-    """加载配置文件"""
+    """加载配置文件；文件不存在时先自动生成一份"""
     global _config
+    if not os.path.exists(_config_path):
+        _init_config_file()
     try:
         with open(_config_path, "r", encoding="utf-8") as f:
             _config = json.load(f)
@@ -51,6 +53,25 @@ def _load_config():
         _config = _default_config()
     # 同步到管理器
     manager.set_config(_config)
+
+
+def _init_config_file():
+    """
+    首次运行：从 config.example.json 复制出 config.json。
+
+    config.json 是本机私有配置（含窗口名等），不纳入版本管理，
+    所以克隆仓库或解压发布包后第一次运行时需要现生成一份。
+    样例文件缺失时退回内置默认配置。
+    """
+    example = os.path.join(BASE_DIR, "config.example.json")
+    try:
+        if os.path.exists(example):
+            shutil.copyfile(example, _config_path)
+        else:
+            with open(_config_path, "w", encoding="utf-8") as f:
+                json.dump(_default_config(), f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass  # 写入失败则退回内存中的默认配置
 
 
 def _save_config(cfg: dict):
@@ -69,18 +90,19 @@ def _default_config() -> dict:
         "rest_rounds_var": 10,
         "rest_seconds": 30,
         "rest_seconds_var": 5,
-        "mouse_speed_min": 2000,
-        "mouse_speed_max": 2500,
+        "mouse_speed_min": 2750,
+        "mouse_speed_max": 3250,
         "match_confirm_count": 2,
         "detection_scale": 0.5,
         "miss_threshold": 20,
         "miss_retry_sleep": 2.0,
+        "same_stage_click_limit": 10,
         "screen": {"xmin": 0, "xmax": 1920, "ymin": 0, "ymax": 1080},
         "instances": [
             {
                 "id": "window-1",
-                "name": "窗口1",
-                "window_title": "阴阳师-网易游戏",
+                "name": "bot1",
+                "window_title": "",
                 "template_scene": "",
                 "limit": 200,
             },
@@ -121,6 +143,19 @@ def resume_bot(instance_id: str):
 
 
 @eel.expose
+def toggle_bot(instance_id: str):
+    """
+    单按钮切换：空闲→启动，运行中→暂停，已暂停→继续。
+    由后端按当前状态分派，前端无需判断状态。
+    """
+    _load_config()
+    inst_cfg = _get_instance_config(instance_id)
+    if inst_cfg is None:
+        return {"ok": False, "msg": f"实例 [{instance_id}] 不存在"}
+    return manager.toggle(instance_id, inst_cfg)
+
+
+@eel.expose
 def emergency_stop():
     """紧急停止所有实例"""
     return manager.stop_all()
@@ -155,8 +190,8 @@ def _get_instance_config(instance_id: str) -> dict | None:
             # 合并：全局作为默认，实例配置覆盖
             merged = {
                 "threshold": _config.get("threshold", 0.75),
-                "mouse_speed_min": _config.get("mouse_speed_min", 2000),
-                "mouse_speed_max": _config.get("mouse_speed_max", 2500),
+                "mouse_speed_min": _config.get("mouse_speed_min", 2750),
+                "mouse_speed_max": _config.get("mouse_speed_max", 3250),
                 "match_confirm_count": _config.get("match_confirm_count", 2),
                 "detection_scale": _config.get("detection_scale", 0.5),
                 "screen": _config.get("screen", {"xmin": 0, "xmax": 1920, "ymin": 0, "ymax": 1080}),
@@ -205,7 +240,7 @@ def add_instance():
     new_inst = {
         "id": f"window-{idx}",
         "name": f"窗口{idx}",
-        "window_title": _config.get("instances", [{}])[0].get("window_title", "阴阳师-网易游戏") if _config.get("instances") else "阴阳师-网易游戏",
+        "window_title": _config.get("instances", [{}])[0].get("window_title", "") if _config.get("instances") else "",
         "template_scene": "",
         "limit": 200,
     }
@@ -261,7 +296,7 @@ def list_scenes():
 
 @eel.expose
 def create_scene(name: str):
-    """新建场景（含 begin/end 子目录）"""
+    """新建场景（含 begin/end 子目录 + baseline / begin / end 三张占位素材）"""
     if not name or not name.strip():
         return {"ok": False, "msg": "场景名不能为空"}
     name = name.strip()
@@ -269,7 +304,13 @@ def create_scene(name: str):
     try:
         os.makedirs(os.path.join(scene_dir, "begin"), exist_ok=True)
         os.makedirs(os.path.join(scene_dir, "end"), exist_ok=True)
-        return {"ok": True, "msg": f"场景「{name}」已创建"}
+        # 预生成三张占位素材：用户直接用真实截图覆盖同名文件即可，无需自行命名
+        for fname in ("baseline.png", "begin.png", "end.png"):
+            fpath = os.path.join(scene_dir, fname)
+            if not os.path.isfile(fpath):
+                _write_placeholder_png(fpath)
+        return {"ok": True,
+                "msg": f"场景「{name}」已创建（已生成 baseline / begin / end 占位图，直接覆盖即可）"}
     except OSError as e:
         return {"ok": False, "msg": str(e)}
 
@@ -395,28 +436,69 @@ def screenshot_screen():
 
 @eel.expose
 def check_baseline(scene: str):
-    """检查场景是否有 baseline.png，返回是否存在及其分辨率"""
-    path = os.path.join(_templates_root, scene, "baseline.png")
-    if os.path.isfile(path):
-        from PIL import Image
-        try:
-            img = Image.open(path)
-            w, h = img.size
-            return {"exists": True, "width": w, "height": h}
-        except Exception:
-            return {"exists": True, "width": 0, "height": 0}
-    return {"exists": False, "width": 0, "height": 0}
+    """检查场景的 baseline.png 是否已设置及其分辨率"""
+    return _image_status(os.path.join(_templates_root, scene, "baseline.png"))
 
 
 @eel.expose
 def save_baseline(scene: str, image_data: str):
     """保存整张截图为 baseline.png"""
-    from PIL import Image
-    path = os.path.join(_templates_root, scene, "baseline.png")
-    raw = base64.b64decode(image_data)
-    img = Image.open(io.BytesIO(raw))
-    img.save(path, "PNG")
-    return {"ok": True, "msg": "基准图已保存", "width": img.width, "height": img.height}
+    return _save_material(os.path.join(_templates_root, scene, "baseline.png"),
+                          image_data, "基准图")
+
+
+@eel.expose
+def check_flags(scene: str):
+    """检查场景的 begin / end 阶段旗帜是否已设置"""
+    scene_dir = os.path.join(_templates_root, scene)
+    return {
+        "begin": _image_status(os.path.join(scene_dir, "begin.png")),
+        "end": _image_status(os.path.join(scene_dir, "end.png")),
+    }
+
+
+@eel.expose
+def import_flag(scene: str, class_name: str, file_data: dict):
+    """导入 / 替换阶段旗帜（与 baseline.png 同级，文件名固定为 begin.png / end.png）"""
+    if class_name not in ("begin", "end"):
+        return {"ok": False, "msg": "阶段标识只能是 begin 或 end"}
+    scene_dir = os.path.join(_templates_root, scene)
+    if not os.path.isdir(scene_dir):
+        return {"ok": False, "msg": "场景不存在"}
+
+    path = os.path.join(scene_dir, f"{class_name}.png")
+    result = _save_material(path, file_data.get("data", ""), f"{class_name} 阶段旗帜")
+    if result.get("ok"):
+        result["msg"] = f"{class_name} 阶段旗帜已保存"
+        result["thumb"] = _image_to_base64_thumb(path)
+    return result
+
+
+@eel.expose
+def make_placeholder(scene: str, kind: str):
+    """
+    为场景生成初始占位素材（极小尺寸），用户直接用截图覆盖同名文件即可，无需自己命名。
+    kind: 'baseline' → baseline.png；'flag' → begin.png + end.png；'all' → 三个都生成
+    """
+    scene_dir = os.path.join(_templates_root, scene)
+    if not os.path.isdir(scene_dir):
+        return {"ok": False, "msg": "场景不存在"}
+
+    targets = []
+    if kind in ("baseline", "all"):
+        targets.append("baseline.png")
+    if kind in ("flag", "all"):
+        targets += ["begin.png", "end.png"]
+    if not targets:
+        return {"ok": False, "msg": "无效的占位类型"}
+
+    try:
+        for fname in targets:
+            _write_placeholder_png(os.path.join(scene_dir, fname))
+        return {"ok": True,
+                "msg": f"已生成初始占位图：{', '.join(targets)}（可直接用截图覆盖同名文件）"}
+    except OSError as e:
+        return {"ok": False, "msg": str(e)}
 
 
 # ============================================================
@@ -481,6 +563,53 @@ def _save_disabled_templates(scene: str, disabled: list):
     path = _disabled_path(scene)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(disabled, f, ensure_ascii=False)
+
+
+# 占位素材判定阈值：短边小于该值（像素）的图片视为「未设置」
+# 需与 autoclick.py 里的 FLAG_PLACEHOLDER_MAX_PX 保持一致
+_PLACEHOLDER_MAX_PX = 20
+
+
+def _write_placeholder_png(path: str):
+    """写入一张极小尺寸的占位图，用于标记「该素材尚未设置」"""
+    from PIL import Image
+    Image.new("RGB", (1, 1), (200, 200, 200)).save(path, "PNG")
+
+
+def _image_status(path: str) -> dict:
+    """
+    检查素材是否已设置。
+    新建场景时生成的占位图尺寸极小，据此区分「未设置」和用户导入的真实截图。
+    """
+    if not os.path.isfile(path):
+        return {"exists": False, "width": 0, "height": 0}
+
+    from PIL import Image
+    try:
+        with Image.open(path) as img:
+            w, h = img.size
+    except Exception:
+        return {"exists": False, "width": 0, "height": 0}
+
+    if w < _PLACEHOLDER_MAX_PX or h < _PLACEHOLDER_MAX_PX:
+        return {"exists": False, "width": w, "height": h}
+    return {"exists": True, "width": w, "height": h}
+
+
+def _save_material(path: str, image_data: str, label: str = "素材") -> dict:
+    """把前端传来的 base64 图片保存到指定路径（baseline / 阶段旗帜共用）"""
+    from PIL import Image
+    try:
+        raw = base64.b64decode(image_data)
+        img = Image.open(io.BytesIO(raw))
+        if img.width < _PLACEHOLDER_MAX_PX or img.height < _PLACEHOLDER_MAX_PX:
+            return {"ok": False,
+                    "msg": f"图片尺寸过小（{img.width}x{img.height}），无法作为{label}"}
+        img.convert("RGB").save(path, "PNG")
+        return {"ok": True, "msg": f"{label}已保存",
+                "width": img.width, "height": img.height}
+    except Exception as e:
+        return {"ok": False, "msg": f"{label}保存失败: {e}"}
 
 
 def _image_to_base64_thumb(fpath: str, max_size: int = 120) -> str:

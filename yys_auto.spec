@@ -1,10 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
 PyInstaller 打包配置
-用法: pyinstaller yys_auto.spec
+
+用法:
+    $env:YYS_APP_VERSION='1.1'
+    pyinstaller yys_auto.spec --distpath ../yys_auto_app
+
+输出目录: yys_auto_app/yys_auto_v<YYS_APP_VERSION>/
+版本号由环境变量 YYS_APP_VERSION 决定，未设置时使用 'dev'。
+推荐直接用打包脚本: .\\build.ps1 -Version 1.1
 """
 
+import os
 import sys
+
+_VERSION = os.environ.get('YYS_APP_VERSION', 'dev')
 
 a = Analysis(
     ['main.py'],
@@ -94,5 +104,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='yys_auto_dist',
+    name=f'yys_auto_v{_VERSION}',
 )
