@@ -23,6 +23,7 @@ import threading
 import time
 import sys
 from collections import defaultdict
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 from pathlib import Path
@@ -50,8 +51,13 @@ def emergency_stop():
 # ============================================================
 #  日志系统
 # ============================================================
+# 日志文件轮转：单文件上限 5 MB，最多保留 3 份历史（yys_auto.log.1 ~ .3）
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
+
+
 def setup_root_file_logger(log_dir: str, level=logging.DEBUG):
-    """设置根日志器，输出到文件（DEBUG 级别）"""
+    """设置根日志器，输出到文件（DEBUG 级别），按体积轮转，避免日志无限增长"""
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "yys_auto.log")
 
@@ -60,7 +66,12 @@ def setup_root_file_logger(log_dir: str, level=logging.DEBUG):
 
     # 避免重复添加 handler
     if not any(isinstance(h, logging.FileHandler) for h in root.handlers):
-        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh = RotatingFileHandler(
+            log_path,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
         fh.setLevel(level)
         fh.setFormatter(logging.Formatter(
             "%(asctime)s | %(name)-16s | %(levelname)-7s | %(message)s",
@@ -375,8 +386,22 @@ REGION_SHRINK_PX = 25
 # 否则 jiu_xiao 那类窄条模板（短边仅 39px）会被整个缩没
 REGION_SHRINK_RATIO = 0.35
 
+# begin 阶段单独的内缩参数：begin 模板一般只框按钮本身、截图比较精确，
+# 沿用 end 的内缩量会让可点击范围明显偏小，所以用更小的值
+REGION_SHRINK_PX_BEGIN = 8
+REGION_SHRINK_RATIO_BEGIN = 0.10
+
 # 相邻区域之间不超过该宽度的缝隙会被自动填补（屏幕像素）
 REGION_FILL_GAP_PX = 6
+
+# 首次进入某阶段、全扫学习可点击区域前先等待这段时间（秒），让场景过渡动画走完。
+# 否则会把动画中间帧的匹配结果一并学进区域，导致可点击范围不准。
+REGION_LEARN_SETTLE_SEC = 1.0
+
+# 是否在点击前复核阶段标志（仅针对「连续同阶段」的点击）。
+# 坐标是识别阶段时算好的，若这期间界面已开始切换，点击会落到错误的区域。
+# 首次进入某阶段时标志刚确认过，不做重复复核，避免白白多一次截图。
+STAGE_RECHECK_ENABLED = True
 
 
 def is_usable_image(img: np.ndarray) -> bool:
@@ -474,6 +499,36 @@ def build_click_cells(boxes: list, shrink: int = 0, fill_gap: int = 0):
 
     total_area = sum(c[2] * c[3] for c in cells)
     return [(c[0], c[1], c[2], c[3]) for c in cells], total_area
+
+
+def cells_to_outline(cells: list, epsilon: float = 2.0) -> list:
+    """
+    把矩形集合转成「外轮廓多边形」，供前端只绘制区域边框。
+
+    相邻矩形共享的边、以及重叠部分都会被合并掉：先把矩形画进一张掩膜，
+    再用 findContours(RETR_CCOMP) 取「外轮廓 + 内部空洞」两层轮廓，
+    最后 approxPolyDP 简化顶点（结果通常只有几十个点）。
+
+    外轮廓与空洞的环绕方向相反，前端把两者放进同一条路径、用 evenodd 规则
+    填充即可自动挖出中间的洞；描边则会把外框和空洞框一起画出来。
+    :return: [[[x, y], ...], ...]，每个元素是一个轮廓多边形的顶点序列
+    """
+    if not cells:
+        return []
+    max_x = max(x + w for (x, y, w, h) in cells)
+    max_y = max(y + h for (x, y, w, h) in cells)
+    mask = np.zeros((int(max_y) + 2, int(max_x) + 2), dtype=np.uint8)
+    for (x, y, w, h) in cells:
+        cv2.rectangle(mask, (int(x), int(y)), (int(x + w), int(y + h)), 255, -1)
+
+    # RETR_CCOMP：同时取「外轮廓」与「内部空洞」两层轮廓
+    contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    outlines = []
+    for cnt in contours:
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        if len(approx) >= 3:
+            outlines.append([[int(p[0][0]), int(p[0][1])] for p in approx])
+    return outlines
 
 
 def sample_point_in_cells(cells: list, total_area: int):
@@ -836,6 +891,8 @@ class AutoClickerBot:
         # 首次进入某阶段时全扫学习一次，之后直接从区域中采样点击
         # 每项形如 {"cells": [(x, y, w, h), ...], "total_area": int}
         self._regions: dict[str, dict | None] = {"begin": None, "end": None}
+        self._region_outline: dict[str, list] = {"begin": [], "end": []}  # 外轮廓（只画边框）
+        self._region_settled: set[str] = set()         # 已等过过渡动画的阶段
         self._stage: str | None = None                 # 当前识别到的阶段
         self._last_clicked_stage: str | None = None    # 上一次点击的阶段
         self._same_stage_clicks = 0                    # 连续点击同一阶段的次数
@@ -992,6 +1049,12 @@ class AutoClickerBot:
             self._match_streak = 0
             self.error_score = 0
             self._retry_rounds = 0
+            # 连续同阶段才复核标志：首次进入该阶段时标志刚确认过，不必重复查
+            if (STAGE_RECHECK_ENABLED and self._same_stage_clicks >= 1
+                    and not self._recheck_stage(class_name)):
+                self.log.info(
+                    f"⏭ {class_name} 阶段标志复核未通过（界面已开始切换），丢弃本次点击")
+                return
             self._click_target(match_result, window_left, window_top)
         else:
             pass  # 攒确认次数中，不操作
@@ -1203,24 +1266,51 @@ class AutoClickerBot:
 
         return begin_result if begin_result else end_result
 
-    def _detect_by_flags(self, detect_img, base_scale):
+    def _judge_stage(self, detect_img, base_scale) -> tuple[str | None, float]:
         """
-        旗帜模式：每帧只扫 begin / end 两张阶段旗帜来判定当前阶段，
-        再从该阶段学习到的「可点击区域」里随机取一个作为点击目标。
-        扫描开销恒定（2 次匹配），与模板总数无关。
+        匹配两张阶段旗帜，判定当前处于哪个阶段（两张都命中时取分数高的）。
+        :return: (阶段名 或 None, 最高分)
         """
         tm = self.template_manager
         begin_hit, begin_score = tm.match_flag(detect_img, "begin", base_scale)
         end_hit, end_score = tm.match_flag(detect_img, "end", base_scale)
 
         if begin_hit and end_hit:
-            stage = "begin" if begin_score >= end_score else "end"
-        elif begin_hit:
-            stage = "begin"
-        elif end_hit:
-            stage = "end"
-        else:
-            stage = None
+            return ("begin" if begin_score >= end_score else "end"), max(begin_score, end_score)
+        if begin_hit:
+            return "begin", begin_score
+        if end_hit:
+            return "end", end_score
+        return None, 0.0
+
+    def _recheck_stage(self, stage: str) -> bool:
+        """
+        点击前复核阶段标志是否依然成立（只用于「连续同阶段」的点击）。
+
+        重新截一帧并匹配阶段旗帜，确认当前仍处于 stage 阶段。
+        复核不通过说明界面已经开始切换，这次点击会落到错误的区域，应当丢弃。
+        """
+        capture_result = self.capture_window(force_activate=False)
+        if capture_result is None:
+            return False
+        screenshot = capture_result[0]
+        frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+        if 0 < self.detection_scale < 1.0:
+            fh, fw = frame.shape[:2]
+            frame = cv2.resize(
+                frame,
+                (int(fw * self.detection_scale), int(fh * self.detection_scale)))
+        base_scale = (self._base_scale or 1.0) * max(self.detection_scale, 0.1)
+        now_stage, _ = self._judge_stage(frame, base_scale)
+        return now_stage == stage
+
+    def _detect_by_flags(self, detect_img, base_scale):
+        """
+        旗帜模式：每帧只扫 begin / end 两张阶段旗帜来判定当前阶段，
+        再从该阶段学习到的「可点击区域」里随机取一个作为点击目标。
+        扫描开销恒定（2 次匹配），与模板总数无关。
+        """
+        stage, _ = self._judge_stage(detect_img, base_scale)
 
         # 阶段发生变化 → 重置「同阶段连续点击」计数
         if stage != self._stage:
@@ -1233,8 +1323,17 @@ class AutoClickerBot:
             self.log.info("❌ 未匹配（阶段旗帜未命中）")
             return None
 
-        # 本轮首次进入该阶段 → 全扫一次，学习可点击区域
+        # 本轮首次进入该阶段 → 全扫一次，学习可点击区域。
+        # 先等一小段让过渡动画走完：动画中间帧的匹配结果会被一并学进区域，
+        # 导致范围不准。等待结束本轮直接返回，下一帧用稳定后的画面重新学习。
         if not self._regions[stage]:
+            if stage not in self._region_settled:
+                self._region_settled.add(stage)
+                self.log.info(
+                    f"⏳ 首次进入 {stage} 阶段，等待 {REGION_LEARN_SETTLE_SEC:.1f}s "
+                    f"待画面稳定后学习可点击区域")
+                self._interruptible_sleep(REGION_LEARN_SETTLE_SEC)
+                return None
             self._learn_regions(detect_img, stage, base_scale)
 
         region = self._regions[stage]
@@ -1272,11 +1371,16 @@ class AutoClickerBot:
 
         boxes = [pos for _, pos, _, _ in matches]
 
-        # 自适应内缩：不超过 REGION_SHRINK_PX，也不超过最窄模板短边的 35%，
-        # 否则窄条模板会被整个缩没（jiu_xiao 场景存在短边仅 39px 的模板）
-        cap = max(1, round(REGION_SHRINK_PX * scale))
+        # 自适应内缩：不超过该阶段的绝对上限，也不超过最窄模板短边的比例上限，
+        # 否则窄条模板会被整个缩没（jiu_xiao 场景存在短边仅 39px 的模板）。
+        # begin 模板通常只框按钮本身、截图精确，用更小的内缩量，避免范围过小。
+        if stage == "begin":
+            cap_px, ratio = REGION_SHRINK_PX_BEGIN, REGION_SHRINK_RATIO_BEGIN
+        else:
+            cap_px, ratio = REGION_SHRINK_PX, REGION_SHRINK_RATIO
+        cap = max(1, round(cap_px * scale))
         thinnest = min(min(w, h) for (_, _, w, h) in boxes)
-        shrink = max(1, min(cap, int(thinnest * REGION_SHRINK_RATIO)))
+        shrink = max(1, min(cap, int(thinnest * ratio)))
 
         cells, total_area = build_click_cells(
             boxes, shrink=shrink, fill_gap=fill_gap)
@@ -1287,6 +1391,8 @@ class AutoClickerBot:
             return
 
         self._regions[stage] = {"cells": cells, "total_area": total_area}
+        # 外轮廓在此算一次即可（供前端只绘制区域边框）
+        self._region_outline[stage] = cells_to_outline(cells)
         self.log.info(
             f"📚 学习 {stage} 阶段：{len(matches)} 个模板命中 → "
             f"轮廓内缩 {shrink}px（最窄短边 {thinnest}px）、填缝 {fill_gap}px 后 "
@@ -1477,6 +1583,18 @@ class AutoClickerBot:
         remaining = max(0, self.limit - self.round_count)
         eta = avg_round * remaining if avg_round > 0 else 0
         click_positions = self.click_positions[-500:]
+
+        # 可点击区域外轮廓：轮廓是在缩小后的识别图上算的，这里换算回窗口原始坐标，
+        # 供前端在点击分布图上叠加显示（只画外边框）
+        scale_back = 1.0 / max(self.detection_scale, 0.1)
+        region_outline: dict[str, list] = {}
+        for _st, _polys in (self._region_outline or {}).items():
+            if _polys:
+                region_outline[_st] = [
+                    [[int(px * scale_back), int(py * scale_back)] for (px, py) in poly]
+                    for poly in _polys
+                ]
+
         return {
             "running": is_running,
             "round": self.round_count,
@@ -1491,6 +1609,7 @@ class AutoClickerBot:
             "last_log": self._log_buf[-1] if self._log_buf else "",
             "click_positions": click_positions,
             "window_rect": self._window_rect,
+            "region_outline": region_outline,
         }
 
     def reset(self):
@@ -1512,6 +1631,8 @@ class AutoClickerBot:
         self._miss_count = 0
         # 阶段识别缓存：清空后下次进入阶段会重新学习
         self._regions = {"begin": None, "end": None}
+        self._region_outline = {"begin": [], "end": []}
+        self._region_settled = set()
         self._stage = None
         self._last_clicked_stage = None
         self._same_stage_clicks = 0

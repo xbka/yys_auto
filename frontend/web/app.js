@@ -107,16 +107,22 @@ async function pollStatus() {
           : "--";
       }
 
-      // 更新点击分布图（数据未变化时跳过重绘）
+      // 更新点击分布图（点位或可点击范围有变化时才重绘）
       const chartEl = card.querySelector(".inst-chart");
       if (chartEl) {
         const curCnt = (st.click_positions && st.click_positions.length) || 0;
-        const lastCnt = parseInt(chartEl.dataset.lastCnt) || 0;
-        const needRedraw = curCnt !== lastCnt || Math.abs(chartEl.clientWidth * window.devicePixelRatio - (chartEl.width || 0)) > 2;
-        if (needRedraw && st.click_positions && st.click_positions.length > 0) {
-          drawClickChart(chartEl, st.click_positions, st.window_rect);
-          chartEl.dataset.lastCnt = curCnt;
-        } else if (needRedraw && (!st.click_positions || st.click_positions.length === 0)) {
+        // 轮廓顶点总数作为「区域是否变化」的指纹
+        const regCnt = st.region_outline
+          ? Object.values(st.region_outline).reduce(
+              (a, polys) => a + (polys || []).reduce((b, poly) => b + poly.length, 0), 0)
+          : 0;
+        const stamp = curCnt + "-" + regCnt;
+        const needRedraw = stamp !== (chartEl.dataset.lastStamp || "")
+          || Math.abs(chartEl.clientWidth * window.devicePixelRatio - (chartEl.width || 0)) > 2;
+        if (needRedraw && (curCnt > 0 || regCnt > 0)) {
+          drawClickChart(chartEl, st.click_positions, st.window_rect, st.region_outline);
+          chartEl.dataset.lastStamp = stamp;
+        } else if (needRedraw) {
           const ctx = chartEl.getContext("2d");
           const dpr = window.devicePixelRatio || 1;
           chartEl.width = chartEl.clientWidth * dpr;
@@ -128,7 +134,7 @@ async function pollStatus() {
           ctx.font = "12px sans-serif";
           ctx.textAlign = "center";
           ctx.fillText("等待数据...", chartEl.clientWidth / 2, chartEl.clientHeight / 2);
-          chartEl.dataset.lastCnt = 0;
+          chartEl.dataset.lastStamp = stamp;
         }
       }
 
@@ -776,9 +782,12 @@ function escAttr(str) {
 
 // ============================================================
 //  点击分布散点图（坐标相对窗口，比例与游戏窗口一致）
+//  叠加两个阶段学习到的「可点击范围」外轮廓（后端已合并成整体）
 // ============================================================
-function drawClickChart(canvas, positions, windowRect) {
-  if (!positions || !positions.length) return;
+function drawClickChart(canvas, positions, windowRect, regionOutline) {
+  positions = positions || [];
+  const hasRegions = !!(regionOutline && Object.keys(regionOutline).length);
+  if (!positions.length && !hasRegions) return;
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
   const w = rect.width;
@@ -830,6 +839,39 @@ function drawClickChart(canvas, positions, windowRect) {
     ctx.stroke();
   }
 
+  // 可点击范围的外轮廓（垫在散点下面）
+  // 轮廓已由后端合并成整体，这里把所有多边形放进同一条路径，
+  // 只 fill / stroke 各一次 —— 重叠处不会加深，也不会出现内部边线
+  if (hasRegions) {
+    const REGION_STYLE = {
+      end:   { fill: "rgba(33, 150, 243, 0.10)", stroke: "rgba(33, 150, 243, 0.55)" },
+      begin: { fill: "rgba(76, 175, 80, 0.10)",  stroke: "rgba(76, 175, 80, 0.55)"  },
+    };
+    const toPx = (pt) => [
+      offX + (pt[0] / winW) * plotW,
+      offY + (pt[1] / winH) * plotH,
+    ];
+    for (const stage of ["end", "begin"]) {
+      const polys = regionOutline[stage];
+      if (!polys || !polys.length) continue;
+      const style = REGION_STYLE[stage] || REGION_STYLE.end;
+      ctx.beginPath();
+      for (const poly of polys) {
+        poly.forEach((pt, i) => {
+          const [px, py] = toPx(pt);
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        });
+        ctx.closePath();
+      }
+      ctx.fillStyle = style.fill;
+      ctx.fill("evenodd");   // 外轮廓与内部空洞在同一路径里，evenodd 会自动挖洞
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = style.stroke;
+      ctx.stroke();
+    }
+  }
+
   // 先 end（蓝），后 begin（绿 → 上层醒目）
   const RADIUS = 2.5;
   const layers = [
@@ -865,6 +907,10 @@ function drawClickChart(canvas, positions, windowRect) {
   ctx.fillStyle = "rgba(33, 150, 243, 0.95)";
   ctx.fillRect(lx + 54, ly - 5, 8, 8);
   ctx.fillText("end", lx + 66, ly + 3);
+  if (hasRegions) {
+    ctx.fillStyle = "#999";
+    ctx.fillText("轮廓=可点击范围", lx + 108, ly + 3);
+  }
 }
 
 // ============================================================

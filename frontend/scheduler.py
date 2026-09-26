@@ -61,6 +61,7 @@ class BotInstance:
                     "eta": s["eta"],
                     "click_positions": s["click_positions"],
                     "window_rect": s.get("window_rect"),
+                    "region_outline": s.get("region_outline") or {},
                 })
                 base["log_lines"] = list(self._bot._log_buf)
             return base
