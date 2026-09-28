@@ -148,7 +148,7 @@ def load_config(config_path: str | None = None) -> dict:
     config = _adapt_frontend_config(config)
 
     # 基础校验
-    for key in ("screens", "bots", "global"):
+    for key in ("bots", "global"):
         if key not in config:
             raise ValueError(f"配置文件缺少必要字段: {key}")
 
@@ -160,11 +160,11 @@ def load_config(config_path: str | None = None) -> dict:
 
 def _adapt_frontend_config(config: dict) -> dict:
     """
-    将前端控制面板使用的配置格式（instances / screen / template_scene）
-    转换为独立运行入口期望的格式（screens / bots / global）。
+    将前端控制面板使用的配置格式（instances / template_scene）
+    转换为独立运行入口期望的格式（bots / global）。
     已经是旧格式时原样返回。
     """
-    if "bots" in config and "screens" in config:
+    if "bots" in config:
         return config
 
     instances = config.get("instances")
@@ -172,21 +172,9 @@ def _adapt_frontend_config(config: dict) -> dict:
         return config
 
     base_dir = Path(__file__).parent
-    default_screen = config.get("screen", {})
 
-    screens: dict[str, dict] = {}
     bots: list[dict] = []
-
     for idx, inst in enumerate(instances, 1):
-        screen = inst.get("screen") or default_screen
-        screen_name = f"screen-{idx}"
-        screens[screen_name] = {
-            "xmin": screen.get("xmin", 0),
-            "xmax": screen.get("xmax", 1920),
-            "ymin": screen.get("ymin", 0),
-            "ymax": screen.get("ymax", 1080),
-        }
-
         scene = inst.get("template_scene", "")
         task_dir = str(base_dir / "templates" / scene) if scene else ""
 
@@ -194,7 +182,6 @@ def _adapt_frontend_config(config: dict) -> dict:
             "name": inst.get("name") or inst.get("id") or f"bot-{idx}",
             "window_title": inst.get("window_title", config.get("window_title", "")),
             "task_dir": task_dir,
-            "screen": screen_name,
             "limit": inst.get("limit", config.get("limit", 200)),
             "threshold": inst.get("threshold", config.get("threshold", 0.75)),
         })
@@ -202,7 +189,7 @@ def _adapt_frontend_config(config: dict) -> dict:
     global_cfg = {k: v for k, v in config.items()
                   if k not in ("instances", "screen", "_comment")}
 
-    return {"screens": screens, "bots": bots, "global": global_cfg}
+    return {"bots": bots, "global": global_cfg}
 
 
 # ============================================================
@@ -379,24 +366,22 @@ class MouseController:
 # 阶段旗帜的占位图判定：短边小于该值（像素）的图片视为「未设置」
 FLAG_PLACEHOLDER_MAX_PX = 20
 
-# 可点击区域轮廓向内收缩的上限（屏幕像素；避开框边缘的相邻 UI，防误触）
-REGION_SHRINK_PX = 25
-
-# 内缩量还不得超过「最窄模板短边」的这个比例，
-# 否则 jiu_xiao 那类窄条模板（短边仅 39px）会被整个缩没
-REGION_SHRINK_RATIO = 0.35
-
-# begin 阶段单独的内缩参数：begin 模板一般只框按钮本身、截图比较精确，
-# 沿用 end 的内缩量会让可点击范围明显偏小，所以用更小的值
-REGION_SHRINK_PX_BEGIN = 8
-REGION_SHRINK_RATIO_BEGIN = 0.10
+# 可点击区域轮廓向内收缩（屏幕像素；避开框边缘的相邻 UI，防误触）。
+# end 模板带背景，需要缩掉一圈，但也不宜太多，否则可点范围明显偏小；
+# 内缩量还不得超过「最窄模板短边」的这个比例，否则窄条模板会被整个缩没。
+#
+# begin 不在此列：它改用「内切圆」采样（半径 = 中心到最近边的距离），
+# 圆本身就不会碰到框边缘，因此不需要额外内缩。
+REGION_SHRINK_PX_END = 15
+REGION_SHRINK_RATIO_END = 0.20
 
 # 相邻区域之间不超过该宽度的缝隙会被自动填补（屏幕像素）
 REGION_FILL_GAP_PX = 6
 
-# 首次进入某阶段、全扫学习可点击区域前先等待这段时间（秒），让场景过渡动画走完。
+# 首次进入某阶段、全扫学习可点击区域前先等待的时间（秒），让场景过渡动画走完。
 # 否则会把动画中间帧的匹配结果一并学进区域，导致可点击范围不准。
-REGION_LEARN_SETTLE_SEC = 1.0
+# 两个阶段分开取值：进入战斗的过渡较短，战斗结算的演出更长。
+REGION_LEARN_SETTLE_SEC = {"begin": 0.5, "end": 2.0}
 
 # 是否在点击前复核阶段标志（仅针对「连续同阶段」的点击）。
 # 坐标是识别阶段时算好的，若这期间界面已开始切换，点击会落到错误的区域。
@@ -501,7 +486,8 @@ def build_click_cells(boxes: list, shrink: int = 0, fill_gap: int = 0):
     return [(c[0], c[1], c[2], c[3]) for c in cells], total_area
 
 
-def cells_to_outline(cells: list, epsilon: float = 2.0) -> list:
+def cells_to_outline(cells: list, epsilon: float = 2.0,
+                     as_circle: bool = False) -> list:
     """
     把矩形集合转成「外轮廓多边形」，供前端只绘制区域边框。
 
@@ -511,6 +497,7 @@ def cells_to_outline(cells: list, epsilon: float = 2.0) -> list:
 
     外轮廓与空洞的环绕方向相反，前端把两者放进同一条路径、用 evenodd 规则
     填充即可自动挖出中间的洞；描边则会把外框和空洞框一起画出来。
+    :param as_circle: True 时按「内切圆」绘制（与 begin 的圆形采样保持一致）
     :return: [[[x, y], ...], ...]，每个元素是一个轮廓多边形的顶点序列
     """
     if not cells:
@@ -519,7 +506,11 @@ def cells_to_outline(cells: list, epsilon: float = 2.0) -> list:
     max_y = max(y + h for (x, y, w, h) in cells)
     mask = np.zeros((int(max_y) + 2, int(max_x) + 2), dtype=np.uint8)
     for (x, y, w, h) in cells:
-        cv2.rectangle(mask, (int(x), int(y)), (int(x + w), int(y + h)), 255, -1)
+        if as_circle:
+            cv2.circle(mask, (int(x + w / 2), int(y + h / 2)),
+                       int(min(w, h) / 2), 255, -1)
+        else:
+            cv2.rectangle(mask, (int(x), int(y)), (int(x + w), int(y + h)), 255, -1)
 
     # RETR_CCOMP：同时取「外轮廓」与「内部空洞」两层轮廓
     contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
@@ -529,6 +520,28 @@ def cells_to_outline(cells: list, epsilon: float = 2.0) -> list:
         if len(approx) >= 3:
             outlines.append([[int(p[0][0]), int(p[0][1])] for p in approx])
     return outlines
+
+
+def sample_point_in_cells_circle(cells: list):
+    """
+    在矩形集合的「内切圆」内随机取点（begin 阶段专用）。
+
+    先随机挑一个矩形，再以其中心为圆心、以「中心到最近边的距离」
+    （短边的一半）为半径，在圆内按面积均匀取一点。
+    圆天然碰不到框边缘，所以 begin 不需要再做轮廓内缩。
+    :return: (x, y) 或 None
+    """
+    if not cells:
+        return None
+    x, y, w, h = random.choice(cells)
+    radius = min(w, h) / 2.0
+    if radius <= 0:
+        return None
+    cx = x + w / 2.0
+    cy = y + h / 2.0
+    angle = random.uniform(0, 2 * math.pi)
+    r = math.sqrt(random.random()) * radius   # sqrt 才保证圆内「面积」均匀
+    return int(cx + r * math.cos(angle)), int(cy + r * math.sin(angle))
 
 
 def sample_point_in_cells(cells: list, total_area: int):
@@ -778,7 +791,6 @@ class AutoClickerBot:
         window_title: str,
         task_dir: str,
         limit: int = 200,
-        screen: tuple = (0, 1920, 0, 1080),
         threshold: float = 0.75,
         mouse_speed_min: int = 2750,
         mouse_speed_max: int = 3250,
@@ -803,7 +815,6 @@ class AutoClickerBot:
         self.name = name
         self.window_title = window_title
         self.limit = limit
-        self.screen = screen
         self.threshold = threshold
         # ---- 循环优化参数 ----
         self.match_confirm_count = match_confirm_count
@@ -994,13 +1005,13 @@ class AutoClickerBot:
                 self.log.warning(f"窗口尺寸异常: {width}x{height}")
                 return None
 
-            x1, x2 = self.screen[0], self.screen[1]
-            y1, y2 = self.screen[2], self.screen[3]
-
-            clip_left = max(left, x1)
-            clip_top = max(top, y1)
-            clip_right = min(left + width, x2)
-            clip_bottom = min(top + height, y2)
+            # 裁剪到实际屏幕范围：窗口可能有一部分在屏幕外，
+            # 而 pyautogui 截取越界区域时会得到黑边甚至直接报错
+            scr_w, scr_h = pyautogui.size()
+            clip_left = max(left, 0)
+            clip_top = max(top, 0)
+            clip_right = min(left + width, scr_w)
+            clip_bottom = min(top + height, scr_h)
 
             if clip_right <= clip_left or clip_bottom <= clip_top:
                 self.log.warning("窗口完全在屏幕外")
@@ -1079,12 +1090,12 @@ class AutoClickerBot:
             click_x = window_left + x
             click_y = window_top + y
         elif class_name == "begin":
-            # 以模板中心为圆心、半径为 w/2 的圆内随机选点
+            # 以模板中心为圆心、「中心到最近边的距离」为半径的圆内随机选点
             cx = window_left + x + w // 2
             cy = window_top + y + h // 2
-            radius = w / 2.0
+            radius = min(w, h) / 2.0
             angle = random.uniform(0, 2 * math.pi)
-            r = random.uniform(0, radius)
+            r = math.sqrt(random.random()) * radius
             click_x = int(cx + r * math.cos(angle))
             click_y = int(cy + r * math.sin(angle))
         else:
@@ -1329,10 +1340,11 @@ class AutoClickerBot:
         if not self._regions[stage]:
             if stage not in self._region_settled:
                 self._region_settled.add(stage)
+                settle = REGION_LEARN_SETTLE_SEC.get(stage, 1.0)
                 self.log.info(
-                    f"⏳ 首次进入 {stage} 阶段，等待 {REGION_LEARN_SETTLE_SEC:.1f}s "
+                    f"⏳ 首次进入 {stage} 阶段，等待 {settle:.1f}s "
                     f"待画面稳定后学习可点击区域")
-                self._interruptible_sleep(REGION_LEARN_SETTLE_SEC)
+                self._interruptible_sleep(settle)
                 return None
             self._learn_regions(detect_img, stage, base_scale)
 
@@ -1341,8 +1353,11 @@ class AutoClickerBot:
             self.log.warning(f"⚠ {stage} 阶段没有可点击区域，本轮跳过点击")
             return None
 
-        # 区域内按面积加权采样，每个像素等概率
-        point = sample_point_in_cells(region["cells"], region["total_area"])
+        # 采样：begin 在「内切圆」内均匀取点，end 在区域内按面积加权取点
+        if stage == "begin":
+            point = sample_point_in_cells_circle(region["cells"])
+        else:
+            point = sample_point_in_cells(region["cells"], region["total_area"])
         if point is None:
             self.log.warning(f"⚠ {stage} 阶段可点击区域为空，本轮跳过点击")
             return None
@@ -1371,16 +1386,15 @@ class AutoClickerBot:
 
         boxes = [pos for _, pos, _, _ in matches]
 
-        # 自适应内缩：不超过该阶段的绝对上限，也不超过最窄模板短边的比例上限，
-        # 否则窄条模板会被整个缩没（jiu_xiao 场景存在短边仅 39px 的模板）。
-        # begin 模板通常只框按钮本身、截图精确，用更小的内缩量，避免范围过小。
-        if stage == "begin":
-            cap_px, ratio = REGION_SHRINK_PX_BEGIN, REGION_SHRINK_RATIO_BEGIN
-        else:
-            cap_px, ratio = REGION_SHRINK_PX, REGION_SHRINK_RATIO
-        cap = max(1, round(cap_px * scale))
+        # 内缩：begin 用内切圆采样，圆本身不会碰到框边缘，不额外内缩；
+        # end 缩掉一圈以避开背景里的相邻 UI，但受绝对上限与「最窄短边比例」约束
+        # （jiu_xiao 场景存在短边仅 39px 的模板，缩多了会被整个缩没）。
         thinnest = min(min(w, h) for (_, _, w, h) in boxes)
-        shrink = max(1, min(cap, int(thinnest * ratio)))
+        if stage == "begin":
+            shrink = 0
+        else:
+            cap = max(1, round(REGION_SHRINK_PX_END * scale))
+            shrink = max(1, min(cap, int(thinnest * REGION_SHRINK_RATIO_END)))
 
         cells, total_area = build_click_cells(
             boxes, shrink=shrink, fill_gap=fill_gap)
@@ -1392,7 +1406,9 @@ class AutoClickerBot:
 
         self._regions[stage] = {"cells": cells, "total_area": total_area}
         # 外轮廓在此算一次即可（供前端只绘制区域边框）
-        self._region_outline[stage] = cells_to_outline(cells)
+        # begin 按内切圆绘制，与它的圆形采样保持一致
+        self._region_outline[stage] = cells_to_outline(
+            cells, as_circle=(stage == "begin"))
         self.log.info(
             f"📚 学习 {stage} 阶段：{len(matches)} 个模板命中 → "
             f"轮廓内缩 {shrink}px（最窄短边 {thinnest}px）、填缝 {fill_gap}px 后 "
@@ -1731,7 +1747,6 @@ if __name__ == "__main__":
         print(f"[错误] 配置文件加载失败: {e}")
         sys.exit(1)
 
-    screens = config["screens"]
     bots_cfg = config["bots"]
     global_cfg = config.get("global", {})
 
@@ -1765,20 +1780,11 @@ if __name__ == "__main__":
     # ----------------------------------------------------------
     bots = []
     for cfg in bots_cfg:
-        screen_name = cfg.get("screen", "main")
-        if screen_name not in screens:
-            print(f"[错误] Bot '{cfg.get('name')}' 指定的屏幕 '{screen_name}' 未在配置中定义")
-            sys.exit(1)
-        screen_rect = screens[screen_name]
-        screen_tuple = (screen_rect["xmin"], screen_rect["xmax"],
-                        screen_rect["ymin"], screen_rect["ymax"])
-
         bot = AutoClickerBot(
             name=cfg["name"],
             window_title=cfg["window_title"],
             task_dir=cfg["task_dir"],
             limit=cfg.get("limit", 200),
-            screen=screen_tuple,
             threshold=cfg.get("threshold", 0.75),
             mouse_speed_min=global_cfg.get("mouse_speed_min", 2750),
             mouse_speed_max=global_cfg.get("mouse_speed_max", 3250),

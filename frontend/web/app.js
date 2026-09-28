@@ -365,11 +365,6 @@ function loadGlobalConfigToForm(cfg) {
   setVal("cfgMissThreshold", cfg.miss_threshold ?? 20);
   setVal("cfgMissRetrySleep", cfg.miss_retry_sleep ?? 2.0);
   setVal("cfgSameStageLimit", cfg.same_stage_click_limit ?? 10);
-  const s = cfg.screen || {};
-  setVal("cfgScrXmin", s.xmin ?? 0);
-  setVal("cfgScrXmax", s.xmax ?? 1920);
-  setVal("cfgScrYmin", s.ymin ?? 0);
-  setVal("cfgScrYmax", s.ymax ?? 1080);
 }
 
 // ============================================================
@@ -427,12 +422,6 @@ document.getElementById("btnSaveCfg").addEventListener("click", async () => {
   // 0 表示关闭该保护，所以不能用 || 兜底
   c.same_stage_click_limit = parseInt(document.getElementById("cfgSameStageLimit").value);
   if (isNaN(c.same_stage_click_limit)) c.same_stage_click_limit = 10;
-  c.screen = {
-    xmin: parseInt(document.getElementById("cfgScrXmin").value) || 0,
-    xmax: parseInt(document.getElementById("cfgScrXmax").value) || 1920,
-    ymin: parseInt(document.getElementById("cfgScrYmin").value) || 0,
-    ymax: parseInt(document.getElementById("cfgScrYmax").value) || 1080,
-  };
   const r = await eel.save_config(c)();
   alert(r.msg);
 });

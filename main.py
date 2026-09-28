@@ -97,7 +97,6 @@ def _default_config() -> dict:
         "miss_threshold": 20,
         "miss_retry_sleep": 2.0,
         "same_stage_click_limit": 10,
-        "screen": {"xmin": 0, "xmax": 1920, "ymin": 0, "ymax": 1080},
         "instances": [
             {
                 "id": "window-1",
@@ -194,7 +193,6 @@ def _get_instance_config(instance_id: str) -> dict | None:
                 "mouse_speed_max": _config.get("mouse_speed_max", 3250),
                 "match_confirm_count": _config.get("match_confirm_count", 2),
                 "detection_scale": _config.get("detection_scale", 0.5),
-                "screen": _config.get("screen", {"xmin": 0, "xmax": 1920, "ymin": 0, "ymax": 1080}),
                 **ic,
             }
             # 每个 bot 单独设置战斗次数，不从全局读取，强制 int

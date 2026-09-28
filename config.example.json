@@ -13,24 +13,12 @@
   "miss_threshold": 20,
   "miss_retry_sleep": 2.0,
   "same_stage_click_limit": 10,
-  "screen": {
-    "xmin": 0,
-    "xmax": 1920,
-    "ymin": 0,
-    "ymax": 1080
-  },
   "instances": [
     {
       "id": "window-1",
       "name": "bot1",
       "window_title": "",
       "template_scene": "",
-      "screen": {
-        "xmin": 0,
-        "xmax": 1920,
-        "ymin": 0,
-        "ymax": 1080
-      },
       "limit": 100
     }
   ],

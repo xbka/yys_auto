@@ -101,11 +101,6 @@ class BotInstance:
 
             # 合并全局默认 + 实例配置
             g = self._global_config
-            screen = instance_cfg.get("screen") or g.get("screen", {})
-            screen_tuple = (
-                screen.get("xmin", 0), screen.get("xmax", 1920),
-                screen.get("ymin", 0), screen.get("ymax", 1080),
-            )
 
             template_scene = instance_cfg.get("template_scene", "")
             task_dir = ""
@@ -119,7 +114,6 @@ class BotInstance:
                 window_title=instance_cfg.get("window_title", g.get("window_title", "")),
                 task_dir=task_dir,
                 limit=int(instance_cfg.get("limit", g.get("limit", 200))),
-                screen=screen_tuple,
                 threshold=instance_cfg.get("threshold", g.get("threshold", 0.75)),
                 mouse_speed_min=instance_cfg.get("mouse_speed_min", g.get("mouse_speed_min", 2750)),
                 mouse_speed_max=instance_cfg.get("mouse_speed_max", g.get("mouse_speed_max", 3250)),
