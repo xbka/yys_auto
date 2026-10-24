@@ -1,13 +1,19 @@
+# yys_auto 运行依赖（Python 3.13，与本机 conda 环境 myenv 完全一致）
+# 安装: conda activate myenv; pip install -r requirements.txt
+
 # 核心依赖
 pyautogui==0.9.54          # 自动化控制鼠标键盘
-opencv-python==4.9.0.80    # 计算机视觉处理 (cv2)
-numpy==1.26.4              # 数值计算基础库
-Pillow==10.3.0             # PIL 图像处理库 (PIL)
-matplotlib==3.8.4          # 数据可视化
+opencv-python==5.0.0.93    # 计算机视觉处理 (cv2)，5.x 需配 numpy 2.x
+numpy==2.5.1               # 数值计算基础库
+Pillow==12.3.0             # PIL 图像处理库 (PIL)
+matplotlib==3.11.1         # 数据可视化（点击分布图）
 
 # Windows 系统依赖
-pywin32==306               # Windows API (win32api)
+pywin32==312               # Windows API (win32api / win32gui)
 keyboard==0.13.5           # 全局快捷键监听 (F12 紧急停止)
 
 # 前端依赖
-eel==0.16.0                # 桌面应用前端框架
+eel==0.18.2                # 桌面应用前端框架
+
+# 打包工具（仅 PyInstaller 打包需要，只跑源码可不装）
+pyinstaller==6.21.0
