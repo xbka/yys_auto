@@ -12,10 +12,11 @@
         ├── yys_auto/                 源码
         └── yys_auto_app/             发布目录
             ├── yys_auto_v1.0/        历史版本
-            └── yys_auto_v1.1/        本次打包产物
+            ├── yys_auto_v1.1/        历史版本
+            └── yys_auto_v<版本号>/   本次打包产物
 
 .EXAMPLE
-    .\build.ps1 -Version 1.1
+    .\build.ps1 -Version 1.2
 
 .NOTES
     版本号只写数字，如 1.1（不要写成 v1.1）
