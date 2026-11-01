@@ -10,7 +10,8 @@
   "mouse_speed_max": 3250,
   "match_confirm_count": 2,
   "detection_scale": 0.5,
-  "miss_threshold": 20,
+  "miss_timeout": 8.0,
+  "battle_timeout": 240,
   "miss_retry_sleep": 2.0,
   "same_stage_click_limit": 10,
   "instances": [

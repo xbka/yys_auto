@@ -158,6 +158,42 @@ def load_config(config_path: str | None = None) -> dict:
     return config
 
 
+# 旧配置里的「连续未匹配次数」按常态帧间隔折算成秒（仅用于兼容老 config.json）
+_LEGACY_MISS_FRAME_SEC = 0.3
+
+
+def resolve_miss_timeout(cfg: dict, default: float = 8.0) -> float:
+    """
+    取出「未匹配超时（秒）」，兼容旧版 miss_threshold（次数）。
+
+    旧版按次数判定，但扫描间隔在 0.25~1.0 秒之间浮动，同样的次数对应
+    5~20 秒不等，所以这里按常态 0.3 秒/帧折算成秒，语义才一致。
+    """
+    raw = cfg.get("miss_timeout")
+    if raw is None:
+        legacy = cfg.get("miss_threshold")
+        if legacy is None:
+            return default
+        try:
+            raw = float(legacy) * _LEGACY_MISS_FRAME_SEC
+        except (TypeError, ValueError):
+            return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(2.0, min(120.0, value))
+
+
+def resolve_battle_timeout(cfg: dict, default: float = 240.0) -> float:
+    """取出「战斗超时（秒）」，即点完 begin 后最多等多久还没打到 end。"""
+    try:
+        value = float(cfg.get("battle_timeout", default))
+    except (TypeError, ValueError):
+        return default
+    return max(60.0, min(900.0, value))
+
+
 def _adapt_frontend_config(config: dict) -> dict:
     """
     将前端控制面板使用的配置格式（instances / template_scene）
@@ -381,12 +417,22 @@ REGION_FILL_GAP_PX = 6
 # 首次进入某阶段、全扫学习可点击区域前先等待的时间（秒），让场景过渡动画走完。
 # 否则会把动画中间帧的匹配结果一并学进区域，导致可点击范围不准。
 # 两个阶段分开取值：进入战斗的过渡较短，战斗结算的演出更长。
-REGION_LEARN_SETTLE_SEC = {"begin": 0.5, "end": 2.0}
+# end 由 2.0 提到 3.0：结算界面首次出现后还在播动画，2 秒时画面仍不稳定。
+REGION_LEARN_SETTLE_SEC = {"begin": 0.5, "end": 3.0}
 
 # 是否在点击前复核阶段标志（仅针对「连续同阶段」的点击）。
 # 坐标是识别阶段时算好的，若这期间界面已开始切换，点击会落到错误的区域。
 # 首次进入某阶段时标志刚确认过，不做重复复核，避免白白多一次截图。
 STAGE_RECHECK_ENABLED = True
+
+# ------------------------------------------------------------
+# 异常类退出保护（与「未匹配」判定彼此独立）
+# ------------------------------------------------------------
+# 过去这两个计数都塞进 error_score，再和 miss_threshold 共用同一个退出判断，
+# 结果把「连续未匹配上限」调大后会被 error_score>=30 提前打断。
+# 现在各管各的：未匹配走时长判定（miss_timeout），下面两类各自计数、各自退出。
+CAPTURE_FAIL_LIMIT = 20    # 连续截图失败次数（0.5s/次，约 10 秒）
+STEP_EXCEPTION_LIMIT = 10  # 连续识别异常帧数
 
 
 def is_usable_image(img: np.ndarray) -> bool:
@@ -798,7 +844,11 @@ class AutoClickerBot:
         match_confirm_count: int = 2,
         detection_scale: float = 0.5,
         # ---- 未匹配重试 ----
-        miss_threshold: int = 20,
+        # miss_timeout: 非战斗状态下，连续多少「秒」找不到目标算一轮失败
+        #               （旧版是数次数 miss_threshold，因扫描间隔动态变化而失真）
+        # battle_timeout: 点完 begin 后最多等多少「秒」还没打到 end，判定战斗等待超时
+        miss_timeout: float = 8.0,
+        battle_timeout: float = 240.0,
         miss_retry_sleep: float = 2.0,
         # ---- 同阶段反复点击保护 ----
         same_stage_click_limit: int = 10,
@@ -820,7 +870,8 @@ class AutoClickerBot:
         self.match_confirm_count = match_confirm_count
         self.detection_scale = detection_scale
         # ---- 未匹配重试 ----
-        self.miss_threshold = miss_threshold
+        self.miss_timeout = float(miss_timeout)
+        self.battle_timeout = float(battle_timeout)
         self.miss_retry_sleep = miss_retry_sleep
         # ---- 同阶段反复点击保护 ----
         self.same_stage_click_limit = same_stage_click_limit
@@ -834,8 +885,7 @@ class AutoClickerBot:
         self.rest_seconds = rest_seconds
         self.rest_seconds_var = rest_seconds_var
         self._rest_count = 0
-        # 首次休息目标：运行 (rest_rounds ± var) 把后触发
-        self._next_rest_at = self._calc_next_rest()
+        # 首次休息目标（按「把」计）在 round_count 初始化后再算，见下方回合统计
 
         # ---- 启停控制 ----
         self._stop_event = stop_event if stop_event is not None else STOP_EVENT
@@ -853,8 +903,18 @@ class AutoClickerBot:
         )
         self.log.addHandler(buf_handler)
         self.log.info(f"Bot [{name}] 就绪")
-        self.error_score = 0
-        self._retry_rounds = 0  # 连续失败重试轮次
+        self.log.info(
+            f"超时设置: 未匹配 {self.miss_timeout:.1f} 秒 / "
+            f"战斗 {self.battle_timeout:.0f} 秒 / "
+            f"重试延时 {self.miss_retry_sleep:.1f} 秒")
+        self.error_score = 0      # 仅用于日志与窗口激活节奏，不参与退出判定
+        self._retry_rounds = 0    # 连续失败重试轮次
+        self._capture_fail_streak = 0    # 连续截图失败次数（成功一帧即清零）
+        self._step_exception_streak = 0  # 连续识别异常帧数（成功一帧即清零）
+        # 未匹配计时：本轮「确实在扫、且预期有目标、却没找到」的起点（0 = 不计时）
+        self._unmatched_since = 0.0
+        # 战斗等待截止时间：点 begin 时按 battle_timeout 算好，超过即判定战斗超时
+        self._battle_wait_until = 0.0
         self.total_time = 0.0
         self.click_times: list[float] = []
         self.click_positions: list[tuple[str, int, int]] = []  # (class_name, x, y)
@@ -892,7 +952,9 @@ class AutoClickerBot:
         # ---- 回合耗时统计（两次 begin 之间的时间）----
         self._last_begin_time: float = 0.0       # 上一次 begin 的时间戳
         self.round_total_duration: float = 0.0   # 已完成回合总耗时（累加）
-        self.round_count: int = 0                # 已完成回合数
+        self.round_count: int = 0                # 已完成回合数（每把 = begin→下一次 begin）
+        # 首次休息目标：打完 (rest_rounds ± var) 把后触发（按把数，不按点击数）
+        self._next_rest_at = self._calc_next_rest()
 
         # 模板管理
         self.template_manager = TemplateManager(task_dir, threshold)
@@ -1181,6 +1243,9 @@ class AutoClickerBot:
             self._in_battle = True
             self._battle_ended = False
             self.battle_start_time = time.time()
+            # 战斗中改用「战斗超时」这个宽松上限，未匹配计时暂停
+            self._battle_wait_until = self.battle_start_time + self.battle_timeout
+            self._unmatched_since = 0.0
             half_time = self.estimated_battle_time / 2.0 if self.estimated_battle_time > 0 else 3.0
             self._begin_cooldown_until = time.time() + half_time  # 前 1/2 战斗时长不扫
             self._interruptible_sleep(0.1)
@@ -1204,6 +1269,7 @@ class AutoClickerBot:
 
             # 结束阶段允许多次点击（结算/MVP等），短暂冷却防连点
             self._in_battle = False
+            self._unmatched_since = 0.0   # 退出战斗，切回「未匹配超时」时钟
             self._end_cooldown_until = time.time() + 1.8
 
     # ----------------------------------------------------------
@@ -1222,9 +1288,22 @@ class AutoClickerBot:
                 continue
             # 从暂停中恢复，累计暂停时长
             if self._pause_begin > 0:
-                self._total_paused += time.time() - self._pause_begin
+                paused = time.time() - self._pause_begin
+                self._total_paused += paused
                 self._pause_begin = 0.0
+                self._shift_battle_clock(paused)
             time.sleep(0.05)
+
+    def _shift_battle_clock(self, seconds: float):
+        """
+        把战斗计时整体后移。
+
+        休息/暂停期间没有在识别，这段时间既不该算进「战斗时长」统计，
+        也不该消耗「战斗超时」的额度，否则休息 30 秒就会从 240 秒里扣掉 30 秒。
+        """
+        if self._in_battle and seconds > 0:
+            self.battle_start_time += seconds
+            self._battle_wait_until += seconds
 
     # ----------------------------------------------------------
     #  休息机制
@@ -1234,7 +1313,7 @@ class AutoClickerBot:
         if self.rest_rounds <= 0:
             return 999999999
         offset = random.randint(-self.rest_rounds_var, self.rest_rounds_var)
-        return max(1, self.click_count + self.rest_rounds + offset)
+        return max(1, self.round_count + self.rest_rounds + offset)
 
     def _do_rest(self):
         """执行一次随机时长的休息"""
@@ -1245,9 +1324,16 @@ class AutoClickerBot:
         self._rest_count += 1
         self.log.info(
             f"☕ 休息 #{self._rest_count} | "
-            f"暂停 {duration}s，已打 {self.click_count} 把 ..."
+            f"暂停 {duration}s，已打 {self.round_count} 把 ..."
         )
+        # 休息期间没在扫描，未匹配时长不计入
+        self._unmatched_since = 0.0
+        rest_start = time.time()
         self._interruptible_sleep(duration)
+        self._unmatched_since = 0.0
+        # 若休息恰好发生在战斗中途（休息按点击数触发，可能刚点完 begin），
+        # 把战斗计时后移，避免休息时间被算进战斗时长/战斗超时
+        self._shift_battle_clock(time.time() - rest_start)
         self._next_rest_at = self._calc_next_rest()
 
     # ----------------------------------------------------------
@@ -1423,6 +1509,8 @@ class AutoClickerBot:
         # end 点击后冷却期内完全跳过扫描和识别
         now = time.time()
         if now < self._end_cooldown_until:
+            # 这期间根本没在扫，不能算作「未匹配」，秒表清零
+            self._unmatched_since = 0.0
             remaining = self._end_cooldown_until - now
             self._interruptible_sleep(max(remaining, 0.02))
             return
@@ -1432,9 +1520,22 @@ class AutoClickerBot:
                 force_activate=(self.error_score % 5 == 0))
             if capture_result is None:
                 self.error_score += 20
-                self.log.warning("窗口捕获失败，连续错误 +20")
+                self._capture_fail_streak += 1
+                self.log.warning(
+                    f"窗口捕获失败（连续 {self._capture_fail_streak}/"
+                    f"{CAPTURE_FAIL_LIMIT}），连续错误 +20")
+                if self._capture_fail_streak >= CAPTURE_FAIL_LIMIT:
+                    self.log.warning(
+                        f"连续 {CAPTURE_FAIL_LIMIT} 次窗口捕获失败，停止运行\n"
+                        f"  可能原因: 模拟器已关闭、窗口被最小化、游戏被完全遮挡")
+                    self.stop_requested = True
+                    return
                 self._interruptible_sleep(0.5)
                 return
+
+            # 这一帧走到了识别环节：两个异常计数器清零（只统计「连续」）
+            self._capture_fail_streak = 0
+            self._step_exception_streak = 0
 
             screenshot, left, top, width, height = capture_result
             screenshot_cv = cv2.cvtColor(
@@ -1480,28 +1581,48 @@ class AutoClickerBot:
                         tname, score)
 
             if match_result:
+                # 只要这一帧匹配到目标（哪怕还要消抖确认），秒表就清零
+                self._unmatched_since = 0.0
                 self._confirm_match(match_result, left, top)
             else:
                 self._match_streak = 0
                 self.error_score += 1
-                if self.error_score >= self.miss_threshold:
-                    self.error_score = 0
-                    self._retry_rounds += 1
-                    if self._retry_rounds >= 3:
+                now = time.time()
+
+                # ============ 两套时钟，互斥 ============
+                if self._in_battle:
+                    # 时钟 A：战斗等待（点完 begin → 首次点中 end）
+                    # 这段本来就没有可点目标，不能按「未匹配」计，只受 battle_timeout 约束
+                    self._unmatched_since = 0.0
+                    if now >= self._battle_wait_until:
+                        waited = now - self.battle_start_time
                         self.log.warning(
-                            f"连续 3 轮每轮 {self.miss_threshold} 次未匹配到目标，停止运行\n"
-                            f"  可能原因: 模板过时、窗口遮挡、游戏界面变化")
+                            f"战斗等待超时（已 {waited:.0f} 秒没匹配到 end，"
+                            f"上限 {self.battle_timeout:.0f} 秒），停止运行\n"
+                            f"  可能原因: 副本战斗比设定更久（调大「战斗超时」）、"
+                            f"end 模板过时、游戏卡在演出里")
                         self.stop_requested = True
                         return
-                    else:
+                else:
+                    # 时钟 B：非战斗（开始界面 / 结算界面 / 加载切图）
+                    if self._unmatched_since == 0.0:
+                        self._unmatched_since = now          # 起表
+                    elif now - self._unmatched_since >= self.miss_timeout:
+                        self._unmatched_since = 0.0
+                        self._retry_rounds += 1
+                        if self._retry_rounds >= 3:
+                            self.log.warning(
+                                f"连续 3 轮每轮 {self.miss_timeout:.1f} 秒未匹配到目标，停止运行\n"
+                                f"  可能原因: 模板过时、窗口遮挡、游戏界面变化")
+                            self.stop_requested = True
+                            return
                         self.log.warning(
-                            f"连续 {self.miss_threshold} 次未匹配，延时重试 "
+                            f"连续 {self.miss_timeout:.1f} 秒未匹配，延时重试 "
                             f"({self._retry_rounds}/3)")
                         self._interruptible_sleep(self.miss_retry_sleep)
                         return  # 跳过动态 sleep
 
                 # 动态扫描间隔
-                now = time.time()
                 if now < self._begin_cooldown_until:
                     # begin 点击后 3s 不扫描，休眠到冷却结束
                     remaining = self._begin_cooldown_until - now
@@ -1523,6 +1644,11 @@ class AutoClickerBot:
             self.log.error(
                 f"run_step 异常: {type(e).__name__}: {e}", exc_info=True)
             self.error_score += 5
+            self._step_exception_streak += 1
+            if self._step_exception_streak >= STEP_EXCEPTION_LIMIT:
+                self.log.error(
+                    f"连续 {STEP_EXCEPTION_LIMIT} 帧识别异常，停止运行")
+                self.stop_requested = True
 
     # ----------------------------------------------------------
     #  主循环
@@ -1548,8 +1674,11 @@ class AutoClickerBot:
                 time.sleep(0.1)
                 continue
             if self._pause_begin > 0:
-                self._total_paused += time.time() - self._pause_begin
+                paused = time.time() - self._pause_begin
+                self._total_paused += paused
                 self._pause_begin = 0.0
+                self._unmatched_since = 0.0   # 暂停期间不算未匹配，恢复后重新起表
+                self._shift_battle_clock(paused)
 
             if 0 < self.limit <= self.click_count:
                 self.log.info(f"已达到次数上限 ({self.limit})，正常结束")
@@ -1558,14 +1687,19 @@ class AutoClickerBot:
 
             self.run_step()
 
-            # 休息检查：达到目标回合数后自动休息
-            if self.rest_rounds > 0 and self.click_count >= self._next_rest_at:
+            # 休息检查：按「已完成的把数」判断。
+            # round_count 在点下新一把 begin 时递增，此时人在战斗里，所以等
+            # 本把第一次点中 end（_in_battle 转 False，回到结算界面）后再休息。
+            if (self.rest_rounds > 0
+                    and self.round_count >= self._next_rest_at
+                    and not self._in_battle):
                 self._do_rest()
 
-            # 防卡死：连续大错误量直接退出
-            if self.error_score >= 30:
-                self.log.warning("卡死风险 (err≥30)，线程退出")
-                break
+            # 退出判定统一由 run_step 内部负责：
+            #   未匹配 → miss_timeout（时长，见 run_step）
+            #   截图失败 / 识别异常 → CAPTURE_FAIL_LIMIT / STEP_EXCEPTION_LIMIT
+            # 此处不再用 error_score 硬编码阈值抢先 break，否则会把
+            # 「连续未匹配上限」调大的设置直接废掉（旧 bug）。
 
         elapsed = time.time() - self.start_time
         self._final_elapsed = max(0, int(elapsed - self._total_paused))
@@ -1645,6 +1779,14 @@ class AutoClickerBot:
         self._end_cooldown_until = 0.0
         self._begin_cooldown_until = 0.0
         self._miss_count = 0
+        self.error_score = 0
+        self._retry_rounds = 0
+        self._capture_fail_streak = 0
+        self._step_exception_streak = 0
+        self._unmatched_since = 0.0
+        self._battle_wait_until = 0.0
+        self._in_battle = False
+        self._battle_ended = True
         # 阶段识别缓存：清空后下次进入阶段会重新学习
         self._regions = {"begin": None, "end": None}
         self._region_outline = {"begin": [], "end": []}
@@ -1791,7 +1933,8 @@ if __name__ == "__main__":
             # ---- 循环优化参数 ----
             match_confirm_count=global_cfg.get("match_confirm_count", 2),
             detection_scale=global_cfg.get("detection_scale", 0.5),
-            miss_threshold=global_cfg.get("miss_threshold", 20),
+            miss_timeout=resolve_miss_timeout(global_cfg),
+            battle_timeout=resolve_battle_timeout(global_cfg),
             miss_retry_sleep=global_cfg.get("miss_retry_sleep", 2.0),
             same_stage_click_limit=global_cfg.get("same_stage_click_limit", 10),
         )

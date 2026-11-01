@@ -11,7 +11,8 @@ import json
 import logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from autoclick import AutoClickerBot, MouseController, MouseWorker, POISON_PILL
+from autoclick import (AutoClickerBot, MouseController, MouseWorker, POISON_PILL,
+                       resolve_miss_timeout, resolve_battle_timeout)
 
 logger = logging.getLogger("yys.system")
 
@@ -109,6 +110,12 @@ class BotInstance:
 
             bot_name = instance_cfg.get("name", self.instance_id)
 
+            # 超时类参数允许实例级覆盖全局（含旧版 miss_threshold 的兼容读取）
+            merged_timeout_cfg = dict(g)
+            for _k in ("miss_timeout", "battle_timeout", "miss_threshold"):
+                if _k in instance_cfg:
+                    merged_timeout_cfg[_k] = instance_cfg[_k]
+
             self._bot = AutoClickerBot(
                 name=bot_name,
                 window_title=instance_cfg.get("window_title", g.get("window_title", "")),
@@ -119,7 +126,8 @@ class BotInstance:
                 mouse_speed_max=instance_cfg.get("mouse_speed_max", g.get("mouse_speed_max", 3250)),
                 match_confirm_count=instance_cfg.get("match_confirm_count", g.get("match_confirm_count", 2)),
                 detection_scale=instance_cfg.get("detection_scale", g.get("detection_scale", 0.5)),
-                miss_threshold=instance_cfg.get("miss_threshold", g.get("miss_threshold", 20)),
+                miss_timeout=resolve_miss_timeout(merged_timeout_cfg),
+                battle_timeout=resolve_battle_timeout(merged_timeout_cfg),
                 miss_retry_sleep=instance_cfg.get("miss_retry_sleep", g.get("miss_retry_sleep", 2.0)),
                 same_stage_click_limit=g.get("same_stage_click_limit", 10),
                 rest_rounds=g.get("rest_rounds", 50),

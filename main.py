@@ -28,6 +28,7 @@ else:
 
 os.chdir(BASE_DIR)
 
+from autoclick import resolve_miss_timeout, resolve_battle_timeout
 from frontend.scheduler import BotManager
 
 # ============================================================
@@ -51,6 +52,16 @@ def _load_config():
             _config = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         _config = _default_config()
+
+    # 兼容旧配置：把「连续未匹配次数」折算成「未匹配超时（秒）」，
+    # 只改内存里的配置，用户在前端点一次保存后才会写回文件。
+    if "miss_timeout" not in _config:
+        legacy = _config.pop("miss_threshold", None)
+        _config["miss_timeout"] = resolve_miss_timeout(
+            {} if legacy is None else {"miss_threshold": legacy})
+    if "battle_timeout" not in _config:
+        _config["battle_timeout"] = resolve_battle_timeout({})
+
     # 同步到管理器
     manager.set_config(_config)
 
@@ -94,7 +105,8 @@ def _default_config() -> dict:
         "mouse_speed_max": 3250,
         "match_confirm_count": 2,
         "detection_scale": 0.5,
-        "miss_threshold": 20,
+        "miss_timeout": 8.0,
+        "battle_timeout": 240,
         "miss_retry_sleep": 2.0,
         "same_stage_click_limit": 10,
         "instances": [

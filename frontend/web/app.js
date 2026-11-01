@@ -362,7 +362,8 @@ function loadGlobalConfigToForm(cfg) {
   setVal("cfgRestRoundsVar", cfg.rest_rounds_var ?? 10);
   setVal("cfgRestSeconds", cfg.rest_seconds ?? 30);
   setVal("cfgRestSecondsVar", cfg.rest_seconds_var ?? 5);
-  setVal("cfgMissThreshold", cfg.miss_threshold ?? 20);
+  setVal("cfgMissTimeout", cfg.miss_timeout ?? 8.0);
+  setVal("cfgBattleTimeout", cfg.battle_timeout ?? 240);
   setVal("cfgMissRetrySleep", cfg.miss_retry_sleep ?? 2.0);
   setVal("cfgSameStageLimit", cfg.same_stage_click_limit ?? 10);
 }
@@ -417,7 +418,8 @@ document.getElementById("btnSaveCfg").addEventListener("click", async () => {
   c.rest_rounds_var  = parseInt(document.getElementById("cfgRestRoundsVar").value)  || 10;
   c.rest_seconds     = parseInt(document.getElementById("cfgRestSeconds").value)     || 30;
   c.rest_seconds_var = parseInt(document.getElementById("cfgRestSecondsVar").value)  || 5;
-  c.miss_threshold   = parseInt(document.getElementById("cfgMissThreshold").value)   || 20;
+  c.miss_timeout     = parseFloat(document.getElementById("cfgMissTimeout").value)   || 8.0;
+  c.battle_timeout   = parseInt(document.getElementById("cfgBattleTimeout").value)   || 240;
   c.miss_retry_sleep = parseFloat(document.getElementById("cfgMissRetrySleep").value) || 2.0;
   // 0 表示关闭该保护，所以不能用 || 兜底
   c.same_stage_click_limit = parseInt(document.getElementById("cfgSameStageLimit").value);

@@ -73,7 +73,7 @@
           <input id="cfgRestRounds" type="number" class="cfg-input cfg-num-sm" min="0" max="9999" step="1">
           <span>±</span>
           <input id="cfgRestRoundsVar" type="number" class="cfg-input cfg-num-sm" min="0" max="500" step="1">
-          <span class="cfg-hint" title="每打N把触发一次休息，±误差范围使每次休息间隔随机变化（设为0关闭休息）">🛈</span>
+          <span class="cfg-hint" title="每打 N 把触发一次休息（按完成的把数算，不按点击数）。达到后等这把战斗结束再歇；±误差范围使间隔随机变化（设为 0 关闭休息）">🛈</span>
         </div>
         <div class="cfg-row">
           <label>休息时长(秒)</label>
@@ -83,14 +83,19 @@
           <span class="cfg-hint" title="每次休息的时长，±误差范围使每次休息时间随机变化">🛈</span>
         </div>
         <div class="cfg-row">
-          <label>连续未匹配上限</label>
-          <input id="cfgMissThreshold" type="number" class="cfg-input cfg-num-sm" min="5" max="200" step="5">
-          <span class="cfg-hint" title="连续 N 次未匹配到图片后，延时重试（最多3轮），减少无效扫描">🛈</span>
+          <label>未匹配超时(秒)</label>
+          <input id="cfgMissTimeout" type="number" class="cfg-input cfg-num-sm" min="2" max="120" step="1">
+          <span class="cfg-hint" title="非战斗状态（开始界面/结算界面/加载）下，连续这么久没识别到任何按钮就延时重试，3 轮都失败才停止。战斗中不生效">🛈</span>
+        </div>
+        <div class="cfg-row">
+          <label>战斗超时(秒)</label>
+          <input id="cfgBattleTimeout" type="number" class="cfg-input cfg-num-sm" min="60" max="900" step="10">
+          <span class="cfg-hint" title="点完 begin 后最多等多久还没打到 end 就停止。短线副本 120~180 够用，长线副本调到 300~360">🛈</span>
         </div>
         <div class="cfg-row">
           <label>未匹配延时(秒)</label>
           <input id="cfgMissRetrySleep" type="number" class="cfg-input cfg-num-sm" min="0.5" max="30" step="0.5">
-          <span class="cfg-hint" title="触发未匹配上限后的等待时间，避免频繁无效扫描">🛈</span>
+          <span class="cfg-hint" title="触发未匹配超时后的等待时间，避免频繁无效扫描">🛈</span>
         </div>
         <div class="cfg-row">
           <label>同阶段点击上限</label>
