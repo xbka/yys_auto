@@ -40,6 +40,22 @@ if (Test-Path $target) {
 
 Write-Host "==== 打包 yys_auto v$Version ====" -ForegroundColor Cyan
 
+# ---- 0) conda 环境：把 Library\bin 加进 PATH ----
+# conda 的第三方 DLL（ffi-8.dll、libssl-3-x64.dll 等）放在 Library\bin，
+# PyInstaller 解析扩展模块的导入表时靠 PATH 查找，找不到就会出现
+# 「扩展模块在包里、它依赖的 DLL 不在包里」的残缺产物（启动即 ImportError）
+$pyCmd = Get-Command python -ErrorAction SilentlyContinue
+if ($pyCmd) {
+    $pyPrefix = & $pyCmd.Source -c "import sys; print(sys.prefix)" 2>$null
+    if ($pyPrefix) {
+        $condaBin = Join-Path $pyPrefix 'Library\bin'
+        if (Test-Path $condaBin) {
+            $env:PATH = "$condaBin;$env:PATH"
+            Write-Host "已把 conda DLL 目录加入 PATH: $condaBin" -ForegroundColor DarkGray
+        }
+    }
+}
+
 # ---- 1) 调用 PyInstaller（版本号经环境变量传给 spec）----
 $env:YYS_APP_VERSION = $Version
 Push-Location $root

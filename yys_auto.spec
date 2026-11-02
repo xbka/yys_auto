@@ -16,10 +16,42 @@ import sys
 
 _VERSION = os.environ.get('YYS_APP_VERSION', 'dev')
 
+
+def _conda_binaries(*names):
+    """
+    收集 conda 环境 Library\\bin 下的 DLL。
+
+    conda 的第三方 DLL 不放在 sys.prefix 根目录，PyInstaller 解析扩展模块
+    的导入表时找不到，结果就打出一个「看着完整、一启动就崩」的包：
+      - 缺 ffi-8.dll     → `_ctypes` 加载失败，报
+        ImportError: DLL load failed while importing _ctypes
+      - 缺 libssl/libcrypto → `_ssl` / `_hashlib` 加载失败
+    这些扩展模块本身会被打包，但它们的依赖不会，所以这里显式声明。
+    """
+    bin_dir = os.path.join(sys.prefix, 'Library', 'bin')
+    found = []
+    for name in names:
+        path = os.path.join(bin_dir, name)
+        if os.path.isfile(path):
+            found.append((path, '.'))
+        else:
+            print(f'[spec] 警告: 未找到 {path}，若打包后报 DLL 加载失败请检查环境')
+    return found
+
+
 a = Analysis(
     ['main.py'],
     pathex=[SPECPATH],
-    binaries=[],
+    binaries=_conda_binaries(
+        'ffi-8.dll',                 # _ctypes
+        'ffi-7.dll',                 # 旧版 libffi 命名
+        'libssl-3-x64.dll',          # _ssl / _hashlib
+        'libcrypto-3-x64.dll',       # 上面两个的依赖
+        'libbz2.dll',                # _bz2
+        'liblzma.dll',               # _lzma
+        'libexpat.dll',              # pyexpat
+        'libmpdec-4.dll',            # _decimal
+    ),
     datas=[
         # 前端静态文件 → 打包到 _MEIPASS/frontend/web/
         ('frontend/web', 'frontend/web'),
