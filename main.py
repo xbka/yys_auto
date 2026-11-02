@@ -28,8 +28,12 @@ else:
 
 os.chdir(BASE_DIR)
 
-from autoclick import resolve_miss_timeout, resolve_battle_timeout
+from autoclick import (resolve_miss_timeout, resolve_battle_timeout,
+                       setup_root_file_logger)
 from frontend.scheduler import BotManager
+
+# GUI 也要落盘日志：打包成 exe 后没有控制台，出问题只能靠 logs\yys_auto.log 定位
+_LOG_PATH = setup_root_file_logger(os.path.join(BASE_DIR, "logs"))
 
 # ============================================================
 #  全局状态

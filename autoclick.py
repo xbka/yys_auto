@@ -55,6 +55,21 @@ def emergency_stop():
 LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 
+# ---- 统一日志格式：文件 / 控制台 / 前端面板共用同一模板 ----
+#   时间 | 来源 | 级别 | 消息
+# 三处只有时间精度不同：文件带完整日期，控制台与前端面板只到时分秒。
+LOG_FORMAT = "%(asctime)s | %(name)-16s | %(levelname)-7s | %(message)s"
+LOG_DATE_FMT = "%Y-%m-%d %H:%M:%S"
+LOG_TIME_FMT = "%H:%M:%S"
+
+
+def make_log_formatter(with_date: bool = True) -> logging.Formatter:
+    """按统一模板构造 formatter（文件用 with_date=True，其余用 False）"""
+    return logging.Formatter(
+        LOG_FORMAT,
+        datefmt=LOG_DATE_FMT if with_date else LOG_TIME_FMT,
+    )
+
 
 def setup_root_file_logger(log_dir: str, level=logging.DEBUG):
     """设置根日志器，输出到文件（DEBUG 级别），按体积轮转，避免日志无限增长"""
@@ -73,10 +88,7 @@ def setup_root_file_logger(log_dir: str, level=logging.DEBUG):
             encoding="utf-8",
         )
         fh.setLevel(level)
-        fh.setFormatter(logging.Formatter(
-            "%(asctime)s | %(name)-16s | %(levelname)-7s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        ))
+        fh.setFormatter(make_log_formatter(with_date=True))
         root.addHandler(fh)
 
     return log_path
@@ -98,6 +110,25 @@ class _LogBufferStream:
         pass
 
 
+def _console_stream():
+    """
+    取一个能安全输出 emoji 的控制台流。
+
+    Windows 控制台默认 GBK，日志里的 🖱 / ✅ 会触发 UnicodeEncodeError，
+    logging 直接吞掉这条消息并打一行「--- Logging error ---」。
+    这里用 UTF-8 + errors="replace" 重包一次；拿不到 fd（GUI 无控制台、
+    IDE 重定向输出）时退回原流。
+    """
+    stream = sys.stdout
+    if stream is None:
+        return None
+    try:
+        return open(stream.fileno(), mode="w", encoding="utf-8",
+                    errors="replace", closefd=False, buffering=1)
+    except (AttributeError, OSError, ValueError):
+        return stream
+
+
 def setup_bot_logger(name: str, level=logging.INFO):
     """为每个 Bot 创建独立 logger，带控制台输出"""
     logger = logging.getLogger(f"yys.{name}")
@@ -108,11 +139,11 @@ def setup_bot_logger(name: str, level=logging.INFO):
                        if not (isinstance(h, logging.StreamHandler)
                                and isinstance(h.stream, _LogBufferStream))]
 
-    # 控制台 handler（简洁格式，只显示消息内容）
+    # 控制台 handler（与文件日志同一模板，只是时间不带日期）
     if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
-        ch = logging.StreamHandler(sys.stdout)
+        ch = logging.StreamHandler(_console_stream())
         ch.setLevel(level)
-        ch.setFormatter(logging.Formatter(f"[{name}] %(message)s"))
+        ch.setFormatter(make_log_formatter(with_date=False))
         logger.addHandler(ch)
 
     return logger
@@ -320,6 +351,31 @@ class MouseController:
         pyautogui.PAUSE = saved_pause
         time.sleep(random.uniform(*CLICK_SETTLE_RANGE))
 
+    def _escape_failsafe_corner(self):
+        """
+        光标正好压在屏幕四角时，pyautogui 的每个动作都会抛 FailSafeException，
+        而移动动作本身也会被拦下 —— 光标永远离不开角落，等于自锁。
+        这里先用 win32 的 SetCursorPos 把光标挪开几像素，再交给 pyautogui。
+        """
+        if not getattr(pyautogui, "FAILSAFE", False):
+            return
+        try:
+            x, y = pyautogui.position()
+            w, h = pyautogui.size()
+        except Exception:
+            return
+        near_left, near_right = x <= 1, x >= w - 2
+        near_top, near_bottom = y <= 1, y >= h - 2
+        if (near_left or near_right) and (near_top or near_bottom):
+            try:
+                import ctypes
+                nx = 20 if near_left else w - 21
+                ny = 20 if near_top else h - 21
+                ctypes.windll.user32.SetCursorPos(int(nx), int(ny))
+                time.sleep(0.02)
+            except Exception:
+                pass
+
     def move_and_click(self, target_x, target_y, duration=None,
                        start_offset_range=(-80, 80),
                        control_offset_range=(-100, 100)):
@@ -327,6 +383,7 @@ class MouseController:
         从当前鼠标位置，经过一条随机贝塞尔曲线移动到目标点并点击。
         控制点数量和偏移范围随距离自适应缩放，远距离也能保证曲线自然流畅。
         """
+        self._escape_failsafe_corner()
         start_x, start_y = pyautogui.position()
 
         # 如果已经在目标附近则微移
@@ -629,7 +686,8 @@ class TemplateManager:
             baseline_img = cv2.imread(str(baseline_path), cv2.IMREAD_COLOR)
             if baseline_img is not None and is_usable_image(baseline_img):
                 self.baseline_h, self.baseline_w = baseline_img.shape[:2]
-                print(f"[baseline] 基准窗口 {self.baseline_w}x{self.baseline_h}")
+                logging.getLogger("yys.templates").info(
+                    f"基准窗口 {self.baseline_w}x{self.baseline_h}（模板缩放基准）")
 
         for class_name in ("begin", "end"):
             self._load_class(class_name)
@@ -791,9 +849,13 @@ class MouseWorker:
     扫描线程通过 input_queue 发送点击指令，MouseWorker 串行执行鼠标操作。
     """
 
+    input_queue: Optional[queue.Queue] = None   # 由入口（BotManager / 命令行）注入
+    instance: Optional["MouseWorker"] = None    # 最近启动的实例，供存活检查用
+
     def __init__(self, input_queue: queue.Queue, mouse: MouseController,
                  stop_event: Optional[threading.Event] = None):
         self.input_queue = input_queue
+        self._class_queue = input_queue
         self.mouse = mouse
         self.thread = None
         self._stop_event = stop_event if stop_event is not None else STOP_EVENT
@@ -801,6 +863,69 @@ class MouseWorker:
     def start(self):
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+        MouseWorker.instance = self
+
+    @classmethod
+    def is_alive(cls) -> bool:
+        """共享鼠标线程是否还在运行"""
+        inst = cls.instance
+        return bool(inst and inst.thread and inst.thread.is_alive())
+
+    @classmethod
+    def revive(cls) -> bool:
+        """
+        鼠标线程意外退出后重新拉起（队列不变，积压的点击会继续执行）。
+
+        过去这里的 _run 没有异常保护：pyautogui 抛一次异常（例如鼠标停在
+        屏幕角落触发 FAILSAFE）线程就静默死掉，之后所有点击只进不出，
+        而扫描线程仍照常打印「🖱 点击 ...」，看起来像点成功了实际没动。
+        """
+        inst = cls.instance
+        if inst is None:
+            return False
+        if cls.is_alive():
+            return True
+        if inst._stop_event.is_set():
+            return False
+
+        logging.getLogger("yys.MouseWorker").warning(
+            "鼠标执行线程此前已退出，正在重启")
+        inst.thread = threading.Thread(
+            target=inst._run, daemon=True, name="MouseWorker-restart")
+        inst.thread.start()
+        return True
+
+    @classmethod
+    def drain(cls, owner: "str | None" = None) -> int:
+        """
+        丢弃队列里尚未执行的点击，返回丢弃条数。
+
+        停止实例时用：队列中的点击对应的是「按下停止之前」的界面，
+        界面早就变了，继续执行只会让鼠标在用户喊停之后还在动。
+
+        :param owner: 只丢弃该 Bot 投递的点击；None 表示全部丢弃
+        """
+        q = cls.input_queue
+        if q is None:
+            return 0
+        kept = []
+        dropped = 0
+        while True:
+            try:
+                item = q.get_nowait()
+            except queue.Empty:
+                break
+            if item == POISON_PILL:
+                kept.append(item)      # 退出信号必须保留
+                continue
+            item_owner = item[3] if len(item) > 3 else None
+            if owner is None or item_owner is None or item_owner == owner:
+                dropped += 1
+            else:
+                kept.append(item)
+        for item in kept:
+            q.put(item)
+        return dropped
 
     def _run(self):
         logger = logging.getLogger("yys.MouseWorker")
@@ -814,12 +939,25 @@ class MouseWorker:
                 logger.info("收到退出指令，MouseWorker 结束")
                 break
 
-            class_name, click_x, click_y = item
-            self.mouse.move_and_click(click_x, click_y)
+            # 队列项格式：前 3 位是点击内容，第 4 位是投递方 Bot 名（可选，
+            # 供停止时精确丢弃该 Bot 尚未执行的点击）
+            class_name, click_x, click_y = item[0], item[1], item[2]
+            # 单次点击失败不能拖垮整个线程，否则后续点击会全部静默丢失
+            try:
+                self.mouse.move_and_click(click_x, click_y)
+                logger.debug(f"点击已执行 @({click_x},{click_y})")
+            except Exception as e:
+                logger.error(
+                    f"鼠标点击执行失败 @({click_x},{click_y}): "
+                    f"{type(e).__name__}: {e}")
+                continue
 
             if class_name == "begin":
-                time.sleep(human_delay(0.5, 0.5))
-                self.mouse.click()
+                try:
+                    time.sleep(human_delay(0.5, 0.5))
+                    self.mouse.click()
+                except Exception as e:
+                    logger.error(f"begin 追点失败: {type(e).__name__}: {e}")
 
 
 # ============================================================
@@ -898,9 +1036,7 @@ class AutoClickerBot:
         # 挂载缓冲 handler
         buf_handler = logging.StreamHandler(_LogBufferStream(self._log_buf))
         buf_handler.setLevel(logging.INFO)
-        buf_handler.setFormatter(
-            logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S")
-        )
+        buf_handler.setFormatter(make_log_formatter(with_date=False))
         self.log.addHandler(buf_handler)
         self.log.info(f"Bot [{name}] 就绪")
         self.log.info(
@@ -911,6 +1047,8 @@ class AutoClickerBot:
         self._retry_rounds = 0    # 连续失败重试轮次
         self._capture_fail_streak = 0    # 连续截图失败次数（成功一帧即清零）
         self._step_exception_streak = 0  # 连续识别异常帧数（成功一帧即清零）
+        self._last_activate_warn = 0.0   # 上次「激活窗口失败」告警的时间，用于限频
+        self._privilege_checked = False  # 是否已检查过游戏窗口的权限级别
         # 未匹配计时：本轮「确实在扫、且预期有目标、却没找到」的起点（0 = 不计时）
         self._unmatched_since = 0.0
         # 战斗等待截止时间：点 begin 时按 battle_timeout 算好，超过即判定战斗超时
@@ -1001,6 +1139,135 @@ class AutoClickerBot:
     # ----------------------------------------------------------
     #  截图窗口
     # ----------------------------------------------------------
+    @staticmethod
+    def _is_elevated_pid(pid) -> Optional[bool]:
+        """
+        判断指定进程是否以管理员权限运行。
+        :return True/False；None 表示读不到（多数情况是对方权限更高）
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.windll.kernel32
+            adv = ctypes.windll.advapi32
+            h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return None
+            try:
+                tok = wintypes.HANDLE()
+                if not adv.OpenProcessToken(h, 0x0008, ctypes.byref(tok)):  # TOKEN_QUERY
+                    return None
+                try:
+                    buf = ctypes.create_string_buffer(4)
+                    ret = wintypes.DWORD()
+                    # TokenElevation = 20
+                    adv.GetTokenInformation(tok, 20, buf, 4, ctypes.byref(ret))
+                    return bool(
+                        ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value)
+                finally:
+                    k32.CloseHandle(tok)
+            finally:
+                k32.CloseHandle(h)
+        except Exception:
+            return None
+
+    def _check_target_privilege(self, hwnd):
+        """
+        检查「游戏进程」与「本程序」的权限级别是否一致。
+
+        Windows 的 UIPI（用户界面特权隔离）规定：低权限进程不能把鼠标/键盘
+        输入发送给高权限窗口，这些点击会被系统直接丢弃。表现就是日志里明明
+        有「🖱 点击」，游戏却毫无反应，而且也无法把该窗口置顶（SetWindowPos
+        返回「拒绝访问」）。每次运行只检查一次。
+        """
+        if self._privilege_checked:
+            return
+        self._privilege_checked = True
+        try:
+            import win32process
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        except Exception:
+            return
+
+        mine = self._is_elevated_pid(os.getpid())
+        theirs = self._is_elevated_pid(pid)
+
+        if theirs is None:
+            self.log.warning(
+                "⚠ 读不到游戏进程权限（通常说明它以管理员身份运行）。"
+                "如果日志有点击但游戏没反应，请右键「以管理员身份运行」本程序")
+            return
+        if theirs and not mine:
+            self.log.warning(
+                "⚠ 权限不匹配：游戏以管理员身份运行，本程序未提权\n"
+                "  Windows 会直接丢弃发往高权限窗口的鼠标点击（日志有点击、游戏无反应），"
+                "窗口也无法置顶。请以管理员身份重新运行本程序")
+        elif theirs and mine:
+            self.log.info("权限检查通过：游戏与本程序均为管理员权限")
+
+    def _activate_window(self, hwnd) -> bool:
+        """
+        把目标窗口切到前台，逐级尝试并**校验结果**。
+
+        背景：Windows 只允许「当前拥有前台权」的进程调用 SetForegroundWindow。
+        从浏览器（控制面板）里点「开始」时，输入给了浏览器进程，本进程没有前台权，
+        单次 SetForegroundWindow 会静默失败（返回 0），窗口一动不动 —— 这正是
+        「点了开始但游戏没跳到前台」的原因。下面按成功率从高到低依次尝试。
+        """
+        try:
+            import ctypes
+            import win32gui
+            from ctypes import windll
+            u = windll.user32
+            k32 = windll.kernel32
+
+            def _is_foreground() -> bool:
+                return u.GetForegroundWindow() == hwnd
+
+            # 1) AttachThreadInput 到当前前台线程，绕开前台锁
+            fore = u.GetForegroundWindow()
+            fore_tid = u.GetWindowThreadProcessId(fore, None)
+            cur_tid = k32.GetCurrentThreadId()
+            tgt_tid = u.GetWindowThreadProcessId(hwnd, None)
+            if fore_tid and fore_tid != cur_tid:
+                u.AttachThreadInput(fore_tid, cur_tid, True)
+                u.AttachThreadInput(cur_tid, tgt_tid, True)
+            try:
+                u.SetForegroundWindow(hwnd)
+                u.BringWindowToTop(hwnd)
+            finally:
+                if fore_tid and fore_tid != cur_tid:
+                    u.AttachThreadInput(cur_tid, tgt_tid, False)
+                    u.AttachThreadInput(fore_tid, cur_tid, False)
+            if _is_foreground():
+                return True
+
+            # 2) 注入一次 Alt 键，解除系统对前台切换的封锁
+            u.keybd_event(0x12, 0, 0, 0)
+            u.keybd_event(0x12, 0, 2, 0)
+            u.SetForegroundWindow(hwnd)
+            if _is_foreground():
+                return True
+
+            # 3) 临时置顶再取消，把窗口抬到最上层
+            #    HWND_TOPMOST/-NOTOPMOST 是 -1/-2，必须用指针类型传，
+            #    否则 64 位下按 int 传会变成无效句柄
+            u.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002)
+            u.SetWindowPos(hwnd, ctypes.c_void_p(-2), 0, 0, 0, 0, 0x0001 | 0x0002)
+            u.SetForegroundWindow(hwnd)
+            if _is_foreground():
+                return True
+
+            # 4) 未公开但常用的兜底
+            try:
+                u.SwitchToThisWindow(hwnd, True)
+            except Exception:
+                pass
+            return _is_foreground()
+        except Exception as e:
+            self.log.warning(f"激活窗口异常: {type(e).__name__}: {e}")
+            return False
+
     def capture_window(self, force_activate=True):
         """
         截取目标窗口（使用 win32gui 直接枚举，与前端 get_windows 一致）。
@@ -1037,24 +1304,22 @@ class AutoClickerBot:
                     f"当前可见窗口: {all_titles[:8]}")
                 return None
 
+            # 首次找到窗口时检查一次权限级别（UIPI 会让点击被静默丢弃）
+            self._check_target_privilege(target_hwnd)
+
             # ---- 激活 & 还原 ----
             if win32gui.IsIconic(target_hwnd):       # 最小化 → 还原
                 win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
             if force_activate:
-                # AttachThreadInput 绕过 Windows 前台锁定限制
-                fore_hwnd = windll.user32.GetForegroundWindow()
-                fore_tid = windll.user32.GetWindowThreadProcessId(fore_hwnd, None)
-                cur_tid = windll.kernel32.GetCurrentThreadId()
-                tgt_tid = windll.user32.GetWindowThreadProcessId(target_hwnd, None)
-
-                if fore_tid != cur_tid:
-                    windll.user32.AttachThreadInput(fore_tid, cur_tid, True)
-                    windll.user32.AttachThreadInput(cur_tid, tgt_tid, True)
-                windll.user32.SetForegroundWindow(target_hwnd)
-                windll.user32.BringWindowToTop(target_hwnd)
-                if fore_tid != cur_tid:
-                    windll.user32.AttachThreadInput(cur_tid, tgt_tid, False)
-                    windll.user32.AttachThreadInput(fore_tid, cur_tid, False)
+                if not self._activate_window(target_hwnd):
+                    # 每帧都会尝试激活，失败时限制告警频率，避免刷屏
+                    now_w = time.time()
+                    if now_w - self._last_activate_warn > 10.0:
+                        self._last_activate_warn = now_w
+                        self.log.warning(
+                            "⚠ 无法把游戏窗口切到前台（Windows 前台锁定）。"
+                            "截图是抓屏幕区域，窗口被别的窗口挡住时识别会失效，"
+                            "请手动点一下游戏窗口或暂停控制面板的遮挡")
                 time.sleep(0.15)
 
             # ---- 获取位置尺寸 ----
@@ -1105,9 +1370,14 @@ class AutoClickerBot:
         cy = y + h // 2
 
         # 是否与上一次匹配为同一目标（类别相同 + 位置接近）
-        if (self._last_matched_class == class_name
-                and abs(cx - self._last_matched_x) < 25
-                and abs(cy - self._last_matched_y) < 25):
+        # 注意：旗帜模式下的坐标是「可点击区域内的随机采样点」（w/h 已置 0），
+        # 同一阶段每帧取的都不是同一个像素，位置比较会让确认计数几乎攒不满，
+        # 表现为「一直看到 begin 却半天才点」。这类点只按阶段类别计数。
+        same_target = self._last_matched_class == class_name
+        if same_target and (w > 0 or h > 0):
+            same_target = (abs(cx - self._last_matched_x) < 25
+                           and abs(cy - self._last_matched_y) < 25)
+        if same_target:
             self._match_streak += 1
         else:
             self._match_streak = 1
@@ -1177,12 +1447,26 @@ class AutoClickerBot:
         )
 
         # 投喂 MouseWorker（格式简化：直接传计算好的坐标）
+        # 先确认鼠标线程还活着：它一旦意外退出，点击只会堆在队列里，
+        # 而日志仍会打印「点击」，看起来像成功其实鼠标根本没动。
+        if not MouseWorker.is_alive():
+            if MouseWorker.revive():
+                self.log.warning("⚠ 鼠标执行线程已退出，已自动重启")
+            else:
+                self.log.error("⚠ 鼠标执行线程未运行，本次点击可能不会执行")
+
+        # 第 4 位带上本 Bot 名字：停止时可以只丢弃自己的积压点击
         MouseWorker.input_queue.put(
-            (class_name, click_x, click_y)
+            (class_name, click_x, click_y, self.name)
         )
 
         score_text = f" 匹配度={score:.2f}" if score >= 0 else ""
         self.log.info(f"🖱 点击 {class_name}[{tname}] @ ({click_x}, {click_y}){score_text}")
+
+        backlog = MouseWorker.input_queue.qsize()
+        if backlog > 3:
+            self.log.warning(
+                f"⚠ 点击队列积压 {backlog} 条，鼠标执行线程可能已卡住或退出")
 
         # ---- 同阶段反复点击保护 ----
         # 点击落空时阶段不会变化、err 也不会增长，所以单独用

@@ -156,9 +156,17 @@ class BotInstance:
             self._state = "stopping"
             self._stop_event.set()
             self._pause_event.clear()
-            if self._bot:
-                self._bot.stop_requested = True  # 防止 stop_event 清除后 status 误判为 running
-            return {"ok": True, "msg": f"[{self.instance_id}] 正在停止..."}
+            bot = self._bot
+            if bot:
+                bot.stop_requested = True  # 防止 stop_event 清除后 status 误判为 running
+
+        # 丢弃本实例尚未执行的点击：这些点击对应的是按下停止之前的界面，
+        # 界面早已不同，继续执行只会让鼠标在喊停之后还在动
+        if bot is not None:
+            dropped = MouseWorker.drain(owner=bot.name)
+            if dropped:
+                logger.info(f"[{self.instance_id}] 已丢弃 {dropped} 条未执行的点击")
+        return {"ok": True, "msg": f"[{self.instance_id}] 正在停止..."}
 
     def pause(self):
         """暂停"""
