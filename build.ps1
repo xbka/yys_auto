@@ -4,8 +4,10 @@
 
 .DESCRIPTION
     按固定规则打包：输出到  ../yys_auto_app/yys_auto_v<版本号>/
-    打包完成后自动补齐运行时需要的 config.example.json / templates / README.md / logs
+    打包完成后自动补齐运行时需要的 config.example.json / README.md / logs
     （不复制本机 config.json，用户首次运行会自动生成）
+    （不复制 templates：场景模板由用户自己在控制面板里创建/维护，
+      程序首次运行会自动建好空的 templates 目录）
 
     目录布局：
         Mycodes/
@@ -69,7 +71,8 @@ if (Test-Path $strayExe) { Remove-Item $strayExe -Force }
 # 用户首次运行时程序会自动从 config.example.json 生成一份
 Copy-Item (Join-Path $root 'config.example.json') $target -Force
 Copy-Item (Join-Path $root 'README.md')   $target -Force
-Copy-Item (Join-Path $root 'templates')   $target -Recurse -Force
+# 不再复制 templates：场景模板由用户在控制面板里维护，
+# 程序启动时会 os.makedirs 自动建空目录
 New-Item -ItemType Directory -Path (Join-Path $target 'logs') -Force | Out-Null
 
 Write-Host ""

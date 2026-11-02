@@ -89,6 +89,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,                # 不显示控制台窗口
+    uac_admin=True,               # 清单写入 requireAdministrator：默认以管理员启动
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
