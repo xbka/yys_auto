@@ -6,8 +6,6 @@ import os
 import sys
 import queue
 import threading
-import time
-import json
 import logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -122,8 +120,6 @@ class BotInstance:
                 task_dir=task_dir,
                 limit=int(instance_cfg.get("limit", g.get("limit", 200))),
                 threshold=instance_cfg.get("threshold", g.get("threshold", 0.75)),
-                mouse_speed_min=instance_cfg.get("mouse_speed_min", g.get("mouse_speed_min", 2750)),
-                mouse_speed_max=instance_cfg.get("mouse_speed_max", g.get("mouse_speed_max", 3250)),
                 match_confirm_count=instance_cfg.get("match_confirm_count", g.get("match_confirm_count", 2)),
                 detection_scale=instance_cfg.get("detection_scale", g.get("detection_scale", 0.5)),
                 miss_timeout=resolve_miss_timeout(merged_timeout_cfg),
@@ -230,6 +226,12 @@ class BotManager:
         with self._lock:
             self._global_config = {k: v for k, v in config.items()
                                    if k not in ("instances", "_available_scenes")}
+            # 鼠标线程是全局单例，速度只在创建时取一次默认值；
+            # 配置改了要同步过去，否则界面上调的速度永远不生效
+            self._mouse_ctrl.speed_min = int(
+                self._global_config.get("mouse_speed_min", 1500))
+            self._mouse_ctrl.speed_max = int(
+                self._global_config.get("mouse_speed_max", 2000))
             instance_configs = config.get("instances", [])
 
             # 创建 / 更新实例
@@ -261,9 +263,6 @@ class BotManager:
     def get_instance_ids(self) -> list:
         """返回所有实例 ID"""
         return sorted(self._instances.keys())
-
-    def get_instance(self, instance_id: str) -> BotInstance | None:
-        return self._instances.get(instance_id)
 
     # ------------------------------------------------------------------
     #  控制

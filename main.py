@@ -10,7 +10,7 @@ import shutil
 import time
 import base64
 import io
-from pathlib import Path
+import re
 
 import eel
 
@@ -29,11 +29,15 @@ else:
 os.chdir(BASE_DIR)
 
 from autoclick import (resolve_miss_timeout, resolve_battle_timeout,
-                       setup_root_file_logger)
+                       setup_root_file_logger, stage_key, parse_stage_stem,
+                       is_self_window, find_window_handle, restore_and_activate,
+                       grab_window_region,
+                       STAGES_DIRNAME, STAGE_TAGS, DEFAULT_STAGES)
 from frontend.scheduler import BotManager
 
 # GUI 也要落盘日志：打包成 exe 后没有控制台，出问题只能靠 logs\yys_auto.log 定位
-_LOG_PATH = setup_root_file_logger(os.path.join(BASE_DIR, "logs"))
+# 只为了副作用（挂上文件 handler），返回值用不到
+setup_root_file_logger(os.path.join(BASE_DIR, "logs"))
 
 # ============================================================
 #  全局状态
@@ -105,8 +109,8 @@ def _default_config() -> dict:
         "rest_rounds_var": 10,
         "rest_seconds": 30,
         "rest_seconds_var": 5,
-        "mouse_speed_min": 2750,
-        "mouse_speed_max": 3250,
+        "mouse_speed_min": 1500,
+        "mouse_speed_max": 2000,
         "match_confirm_count": 2,
         "detection_scale": 0.5,
         "miss_timeout": 8.0,
@@ -129,32 +133,9 @@ def _default_config() -> dict:
 #  Eel 暴露接口 — 控制
 # ============================================================
 @eel.expose
-def start_bot(instance_id: str):
-    """启动指定实例的 Bot"""
-    _load_config()
-    # 找到该实例的配置
-    inst_cfg = _get_instance_config(instance_id)
-    if inst_cfg is None:
-        return {"ok": False, "msg": f"实例 [{instance_id}] 不存在"}
-    return manager.start(instance_id, inst_cfg)
-
-
-@eel.expose
 def stop_bot(instance_id: str):
     """停止指定实例"""
     return manager.stop(instance_id)
-
-
-@eel.expose
-def pause_bot(instance_id: str):
-    """暂停指定实例"""
-    return manager.pause(instance_id)
-
-
-@eel.expose
-def resume_bot(instance_id: str):
-    """恢复指定实例"""
-    return manager.resume(instance_id)
 
 
 @eel.expose
@@ -205,8 +186,8 @@ def _get_instance_config(instance_id: str) -> dict | None:
             # 合并：全局作为默认，实例配置覆盖
             merged = {
                 "threshold": _config.get("threshold", 0.75),
-                "mouse_speed_min": _config.get("mouse_speed_min", 2750),
-                "mouse_speed_max": _config.get("mouse_speed_max", 3250),
+                "mouse_speed_min": _config.get("mouse_speed_min", 1500),
+                "mouse_speed_max": _config.get("mouse_speed_max", 2000),
                 "match_confirm_count": _config.get("match_confirm_count", 2),
                 "detection_scale": _config.get("detection_scale", 0.5),
                 **ic,
@@ -295,9 +276,444 @@ def save_instance_config(instance_id: str, field: str, value):
 # ============================================================
 #  Eel 暴露接口 — 模板管理
 # ============================================================
+def _non_ascii_chars(text: str) -> str:
+    """返回字符串里出现的非 ASCII 字符（去重保序），用来在提示里点名哪些字不能用"""
+    seen = []
+    for ch in text or "":
+        if ord(ch) > 127 and ch not in seen:
+            seen.append(ch)
+    return "".join(seen)
+
+
+def _sanitize_filename(name: str) -> str:
+    """
+    把文件名里的非 ASCII 字符清理掉，只留英文、数字、点、下划线、横线。
+
+    Windows 下 OpenCV（cv2.imread）读不了中文路径，模板图存成中文名
+    之后程序就再也读不到，所以导入时统一净化，别让用户踩这个坑。
+    全是中文的文件名（如「魂王按钮.png」）会退回 imported.png。
+    """
+    base = os.path.basename((name or "").replace("\\", "/"))
+    stem, ext = os.path.splitext(base)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_")
+    if not stem:
+        stem = "imported"
+    if not re.fullmatch(r"\.[A-Za-z0-9]{1,5}", ext or ""):
+        ext = ".png"
+    return stem + ext
+
+
+# ============================================================
+#  阶段（<场景>/序号_标签_名字，直接放在场景目录下）
+# ============================================================
+def _stages_dir(scene: str) -> str:
+    """阶段文件直接存在场景目录下，不再有 stages/ 子目录"""
+    return os.path.join(_templates_root, scene)
+
+
+def _stage_paths(scene: str, key: str):
+    """返回 (标志图路径, 按钮模板目录)"""
+    sdir = _stages_dir(scene)
+    return os.path.join(sdir, f"{key}.png"), os.path.join(sdir, key)
+
+
+def _migrate_legacy_structure(scene: str) -> bool:
+    """
+    把两种旧布局归拢到场景目录下（阶段现在直接存在 <场景>/ 里）：
+
+    1. 早先版本用的 <场景>/stages/ 子目录 → 搬回 <场景>/，空的 stages/ 删掉
+    2. 更早的 begin.png / begin/ → 01_start_begin.png / 01_start_begin/
+       end.png / end/ → 02_end_result.png / 02_end_result/
+
+    幂等：已有同名文件不覆盖；对应 tag 已经存在阶段时不再重复补。
+    """
+    scene_dir = os.path.join(_templates_root, scene)
+    if not os.path.isdir(scene_dir):
+        return False
+    moved = False
+
+    # 1) stages/ 子目录里的阶段搬回场景根
+    old_dir = os.path.join(scene_dir, STAGES_DIRNAME)
+    if os.path.isdir(old_dir):
+        try:
+            for name in os.listdir(old_dir):
+                src = os.path.join(old_dir, name)
+                dst = os.path.join(scene_dir, name)
+                if not os.path.exists(dst):
+                    os.replace(src, dst)
+                    moved = True
+            os.rmdir(old_dir)
+        except OSError:
+            pass
+
+    # 2) 旧 begin/end 结构 → 新命名
+    used_index, used_tag = [], set()
+    for fname in os.listdir(scene_dir):
+        parsed = parse_stage_stem(os.path.splitext(fname)[0])
+        if parsed is not None:
+            used_index.append(parsed[0])
+            used_tag.add(parsed[1])
+    for index, tag, name in DEFAULT_STAGES:
+        if tag in used_tag:
+            continue
+        legacy = "begin" if tag == "start" else "end"
+        flag_src = os.path.join(scene_dir, f"{legacy}.png")
+        dir_src = os.path.join(scene_dir, legacy)
+        if not os.path.isfile(flag_src) and not os.path.isdir(dir_src):
+            continue
+        i = index
+        while i in used_index:
+            i += 1
+        used_index.append(i)
+        key = stage_key(i, tag, name)
+        flag_dst = os.path.join(scene_dir, f"{key}.png")
+        dir_dst = os.path.join(scene_dir, key)
+        try:
+            if os.path.isfile(flag_src) and not os.path.exists(flag_dst):
+                os.replace(flag_src, flag_dst)
+            if os.path.isdir(dir_src) and not os.path.exists(dir_dst):
+                os.replace(dir_src, dir_dst)
+            # 标志图缺失时补占位图，否则阶段卡片不会出现在列表里
+            if not os.path.isfile(flag_dst):
+                _write_placeholder_png(flag_dst)
+        except OSError:
+            continue
+        moved = True
+    return moved
+
+
+def _scan_stages(scene: str) -> list:
+    """扫描场景目录下的阶段标志图，按序号排序（老场景会先归一化旧布局）"""
+    _migrate_legacy_structure(scene)
+    sdir = _stages_dir(scene)
+    if not os.path.isdir(sdir):
+        return []
+    items = []
+    for fname in os.listdir(sdir):
+        stem, ext = os.path.splitext(fname)
+        if ext.lower() not in (".png", ".jpg", ".jpeg", ".bmp"):
+            continue
+        parsed = parse_stage_stem(stem)
+        if parsed is None:
+            continue
+        index, tag, name = parsed
+        items.append({
+            "index": index, "tag": tag, "name": name,
+            "key": stage_key(index, tag, name),
+            "flag_path": os.path.join(sdir, fname),
+        })
+    items.sort(key=lambda x: x["index"])
+    return items
+
+
+def _sorted_by_role(order: list) -> list:
+    """按角色重排：start 恒第一、end 恒最后，mid 保持原有相对顺序"""
+    rank = {"start": 0, "mid": 1, "end": 2}
+    return sorted(order, key=lambda s: rank.get(s["tag"], 1))
+
+
+def _reindex_stages(scene: str, ordered: list):
+    """
+    按给定顺序重排阶段编号（01..NN 连续）。
+    先全部改成临时名再改成终名，否则 02 与 03 互换时会互相覆盖。
+    """
+    sdir = _stages_dir(scene)
+    staged = []
+    for i, item in enumerate(ordered, start=1):
+        old_key = item["key"]
+        tmp_key = f"__tmp{i:03d}__"
+        src = os.path.join(sdir, old_key + ".png")
+        if os.path.exists(src):
+            os.replace(src, os.path.join(sdir, tmp_key + ".png"))
+        src_dir = os.path.join(sdir, old_key)
+        if os.path.isdir(src_dir):
+            os.replace(src_dir, os.path.join(sdir, tmp_key))
+        staged.append((tmp_key, item["tag"], item["name"], i))
+
+    for tmp_key, tag, name, i in staged:
+        final_key = stage_key(i, tag, name)
+        src = os.path.join(sdir, tmp_key + ".png")
+        if os.path.exists(src):
+            os.replace(src, os.path.join(sdir, final_key + ".png"))
+        src_dir = os.path.join(sdir, tmp_key)
+        if os.path.isdir(src_dir):
+            os.replace(src_dir, os.path.join(sdir, final_key))
+
+
+def _validate_stage_name(scene: str, name: str, tag: str, ignore_key: str = ""):
+    """校验阶段名与标签，返回错误文案或 None"""
+    bad = _non_ascii_chars(name)
+    if bad:
+        return f"阶段名不能含中文或其它非 ASCII 字符：{bad}"
+    if not re.fullmatch(r"[a-z0-9_]{1,12}", name or ""):
+        return "阶段名只能用 1~12 个小写字母、数字或下划线，例如 mvp、reward"
+    if tag not in STAGE_TAGS:
+        return "阶段标签只能是 start / mid / end"
+    for st in _scan_stages(scene):
+        if st["key"] == ignore_key:
+            continue
+        if st["name"] == name:
+            return f"已有同名阶段「{name}」，换个名字"
+        if tag in ("start", "end") and st["tag"] == tag:
+            return f"已经有 {tag} 阶段了，开始 / 结束各只能有一个"
+    return None
+
+
 @eel.expose
+def list_stages(scene: str):
+    """列出场景的全部阶段（含标志缩略图与按钮模板缩略图）"""
+    if not os.path.isdir(os.path.join(_templates_root, scene)):
+        return {"ok": False, "msg": "场景不存在", "stages": []}
+    disabled = _load_disabled_templates(scene)
+    out = []
+    for st in _scan_stages(scene):
+        status = _image_status(st["flag_path"])
+        thumb = _image_to_base64_thumb(st["flag_path"]) if status["exists"] else ""
+        tdir = os.path.join(_stages_dir(scene), st["key"])
+        templates = []
+        if os.path.isdir(tdir):
+            for fname in sorted(os.listdir(tdir)):
+                if not fname.lower().endswith((".png", ".jpg", ".jpeg", ".bmp")):
+                    continue
+                templates.append({
+                    "filename": fname,
+                    "thumbnail": _image_to_base64_thumb(os.path.join(tdir, fname)),
+                    "enabled": not _is_template_disabled(disabled, st["key"], fname),
+                })
+        out.append({
+            "index": st["index"], "tag": st["tag"], "name": st["name"],
+            "key": st["key"], "flag": status, "flag_thumb": thumb,
+            "templates": templates,
+        })
+    return {"ok": True, "stages": out}
+
+
+@eel.expose
+def add_stage(scene: str, name: str, tag: str = "mid", after_key: str = ""):
+    """
+    新增阶段：只填名字，标签默认 mid，编号自动生成。
+
+    顺序固定为「start 第一、end 最后」，新加的 mid 一律落在两者之间：
+    选中某行就插在它后面（选中的是 end 则插在 end 之前），
+    没选中就插在最后一个非 end 阶段之后。
+    """
+    if not os.path.isdir(os.path.join(_templates_root, scene)):
+        return {"ok": False, "msg": "场景不存在"}
+    name = (name or "").strip()
+    err = _validate_stage_name(scene, name, tag)
+    if err:
+        return {"ok": False, "msg": err}
+
+    stages = _scan_stages(scene)
+    try:
+        os.makedirs(_stages_dir(scene), exist_ok=True)
+        # 先用临时编号建文件，随后统一重排到最终编号
+        index = stages[-1]["index"] + 1 if stages else 1
+        key = stage_key(index, tag, name)
+        flag_path, tpl_dir = _stage_paths(scene, key)
+        os.makedirs(tpl_dir, exist_ok=True)
+        _write_placeholder_png(flag_path)
+
+        order = [{"key": s["key"], "tag": s["tag"], "name": s["name"]} for s in stages]
+        if tag == "start":
+            pos = 0
+        elif tag == "end":
+            pos = len(order)
+        else:
+            anchor = None
+            if after_key:
+                anchor = next((i for i, s in enumerate(order) if s["key"] == after_key), None)
+            if anchor is None:
+                # 没选中（或选中的行已不存在）：插在 end 之前
+                pos = next((i for i, s in enumerate(order) if s["tag"] == "end"), len(order))
+            elif order[anchor]["tag"] == "end":
+                pos = anchor          # mid 不能排到 end 后面
+            else:
+                pos = anchor + 1
+        order.insert(pos, {"key": key, "tag": tag, "name": name})
+        _reindex_stages(scene, order)
+        return {"ok": True,
+                "msg": f"已新增阶段「{name}」（{tag}），接着设置标志图和按钮模板"}
+    except OSError as e:
+        return {"ok": False, "msg": str(e)}
+
+
+@eel.expose
+def update_stage(scene: str, key: str, name: str, tag: str):
+    """修改阶段名字或标签，标志图与目录一起重命名"""
+    stages = _scan_stages(scene)
+    if not any(s["key"] == key for s in stages):
+        return {"ok": False, "msg": "阶段不存在"}
+    name = (name or "").strip()
+    err = _validate_stage_name(scene, name, tag, ignore_key=key)
+    if err:
+        return {"ok": False, "msg": err}
+    try:
+        order = [{"key": s["key"], "tag": s["tag"], "name": s["name"]} for s in stages]
+        for item in order:
+            if item["key"] == key:
+                item["tag"], item["name"] = tag, name
+        _reindex_stages(scene, _sorted_by_role(order))
+        return {"ok": True, "msg": "阶段已更新"}
+    except OSError as e:
+        return {"ok": False, "msg": str(e)}
+
+
+@eel.expose
+def move_stage(scene: str, key: str, direction: str):
+    """调整阶段顺序：direction = up / down，编号自动重排"""
+    stages = _scan_stages(scene)
+    keys = [s["key"] for s in stages]
+    if key not in keys:
+        return {"ok": False, "msg": "阶段不存在"}
+    i = keys.index(key)
+    if stages[i]["tag"] in ("start", "end"):
+        return {"ok": False, "msg": "开始 / 结束阶段固定在首尾，不能移动"}
+    j = i - 1 if direction == "up" else i + 1
+    if j < 0 or j >= len(keys):
+        return {"ok": False, "msg": "已经到头了"}
+    if stages[j]["tag"] in ("start", "end"):
+        return {"ok": False, "msg": "中间阶段只能在 begin 与 end 之间调整"}
+    order = [{"key": s["key"], "tag": s["tag"], "name": s["name"]} for s in stages]
+    order[i], order[j] = order[j], order[i]
+    try:
+        _reindex_stages(scene, order)
+        return {"ok": True, "msg": "顺序已调整"}
+    except OSError as e:
+        return {"ok": False, "msg": str(e)}
+
+
+@eel.expose
+def delete_stage(scene: str, key: str):
+    """删除阶段（标志图 + 按钮模板目录），剩余编号自动重排"""
+    stages = _scan_stages(scene)
+    target = next((s for s in stages if s["key"] == key), None)
+    if target is None:
+        return {"ok": False, "msg": "阶段不存在"}
+    try:
+        flag_path, tpl_dir = _stage_paths(scene, key)
+        if os.path.isfile(flag_path):
+            os.remove(flag_path)
+        if os.path.isdir(tpl_dir):
+            shutil.rmtree(tpl_dir)
+        order = [{"key": s["key"], "tag": s["tag"], "name": s["name"]}
+                 for s in stages if s["key"] != key]
+        _reindex_stages(scene, order)
+        return {"ok": True, "msg": f"阶段「{target['name']}」已删除"}
+    except OSError as e:
+        return {"ok": False, "msg": str(e)}
+
+
+@eel.expose
+def import_stage_flag(scene: str, key: str, file_data: dict):
+    """导入 / 替换某阶段的标志图"""
+    if not os.path.isdir(_stages_dir(scene)):
+        return {"ok": False, "msg": "场景或阶段不存在"}
+    flag_path, _ = _stage_paths(scene, key)
+    result = _save_material(flag_path, file_data.get("data", ""), f"{key} 阶段标志")
+    if result.get("ok"):
+        result["msg"] = f"{key} 标志已保存"
+        result["thumb"] = _image_to_base64_thumb(flag_path)
+    return result
+
+
+@eel.expose
+def import_stage_template(scene: str, key: str, file_data: dict):
+    """导入某阶段的按钮模板"""
+    if not os.path.isdir(_stages_dir(scene)):
+        return {"ok": False, "msg": "场景或阶段不存在"}
+    _, tpl_dir = _stage_paths(scene, key)
+    os.makedirs(tpl_dir, exist_ok=True)
+    raw_name = file_data.get("name", "imported.png")
+    name = _sanitize_filename(raw_name)
+    raw = base64.b64decode(file_data.get("data", ""))
+    fpath = os.path.join(tpl_dir, name)
+    base, ext = os.path.splitext(name)
+    counter = 1
+    while os.path.exists(fpath):
+        fpath = os.path.join(tpl_dir, f"{base}_{counter}{ext}")
+        counter += 1
+    with open(fpath, "wb") as f:
+        f.write(raw)
+    saved = os.path.basename(fpath)
+    if saved != os.path.basename(raw_name):
+        return {"ok": True, "msg": f"已导入，原文件名含中文已存为 {saved}"}
+    return {"ok": True, "msg": "模板已导入"}
+
+
+@eel.expose
+def delete_stage_template(scene: str, key: str, filename: str):
+    """删除某阶段的一张按钮模板（同时从停用清单里移除，避免同名新模板被误停用）"""
+    _, tpl_dir = _stage_paths(scene, key)
+    fpath = os.path.join(tpl_dir, filename)
+    if os.path.isfile(fpath):
+        os.remove(fpath)
+        disabled = _load_disabled_templates(scene)
+        if _drop_disabled_entry(disabled, key, filename):
+            try:
+                _save_disabled_templates(scene, disabled)
+            except OSError:
+                pass
+        return {"ok": True, "msg": "模板已删除"}
+    return {"ok": False, "msg": "文件不存在"}
+
+
+@eel.expose
+def set_template_enabled(scene: str, key: str, filename: str, enabled: bool):
+    """启用 / 停用某阶段的一张按钮模板（停用的模板运行时跳过，不参与匹配）"""
+    _, tpl_dir = _stage_paths(scene, key)
+    if not os.path.isfile(os.path.join(tpl_dir, filename)):
+        return {"ok": False, "msg": "文件不存在"}
+    disabled = _load_disabled_templates(scene)
+    if enabled:
+        if not _drop_disabled_entry(disabled, key, filename):
+            return {"ok": True, "msg": "模板已是启用状态"}
+        msg = "模板已启用"
+    else:
+        if _is_template_disabled(disabled, key, filename):
+            return {"ok": True, "msg": "模板已是停用状态"}
+        disabled.append(f"{key}/{filename}")
+        msg = "模板已停用"
+    try:
+        _save_disabled_templates(scene, disabled)
+    except OSError as e:
+        return {"ok": False, "msg": f"写入停用清单失败：{e}"}
+    return {"ok": True, "msg": msg, "enabled": bool(enabled)}
+
+
+@eel.expose
+def capture_stage(scene: str, key: str, kind: str, image_data: str,
+                  x1: int, y1: int, x2: int, y2: int):
+    """保存截取的阶段标志或按钮模板，kind = flag / template"""
+    from PIL import Image
+    raw = base64.b64decode(image_data)
+    img = Image.open(io.BytesIO(raw))
+    left, top = min(x1, x2), min(y1, y2)
+    right, bottom = max(x1, x2), max(y1, y2)
+    cropped = img.crop((left, top, right, bottom))
+
+    flag_path, tpl_dir = _stage_paths(scene, key)
+    try:
+        if kind == "flag":
+            # 与导入走同一套阈值：太小的图会被当成「未设置」，
+            # 存下来只会让人以为设好了，运行时却认不出这一页
+            if cropped.width < _PLACEHOLDER_MAX_PX or cropped.height < _PLACEHOLDER_MAX_PX:
+                return {"ok": False,
+                        "msg": f"框选范围太小（{cropped.width}x{cropped.height}），"
+                               f"标志图短边至少 {_PLACEHOLDER_MAX_PX}px，重新框一次"}
+            cropped.convert("RGB").save(flag_path, "PNG")
+            return {"ok": True, "msg": f"{key} 标志已保存"}
+        os.makedirs(tpl_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        fpath = os.path.join(tpl_dir, f"capture_{ts}.png")
+        cropped.save(fpath, "PNG")
+        return {"ok": True, "msg": "模板已保存", "filename": os.path.basename(fpath)}
+    except OSError as e:
+        return {"ok": False, "msg": str(e)}
+
+
 def list_scenes():
-    """列出所有场景目录名"""
+    """列出所有场景目录名（内部助手，经 get_config 的 _available_scenes 提供给前端）"""
     if not os.path.isdir(_templates_root):
         return []
     scenes = []
@@ -310,21 +726,31 @@ def list_scenes():
 
 @eel.expose
 def create_scene(name: str):
-    """新建场景（含 begin/end 子目录 + baseline / begin / end 三张占位素材）"""
+    """新建场景：一张 baseline 占位图 + 两个默认阶段（01_start_begin、02_end_result）"""
     if not name or not name.strip():
         return {"ok": False, "msg": "场景名不能为空"}
     name = name.strip()
+    bad = _non_ascii_chars(name)
+    if bad:
+        return {"ok": False,
+                "msg": f"场景名不能含中文或其它非 ASCII 字符：{bad}\n"
+                       f"Windows 下 OpenCV 读不了中文路径，含中文的场景会读不到模板。\n"
+                       f"请改用英文、数字或下划线，例如 chi、hunwang、999"}
     scene_dir = os.path.join(_templates_root, name)
     try:
-        os.makedirs(os.path.join(scene_dir, "begin"), exist_ok=True)
-        os.makedirs(os.path.join(scene_dir, "end"), exist_ok=True)
-        # 预生成三张占位素材：用户直接用真实截图覆盖同名文件即可，无需自行命名
-        for fname in ("baseline.png", "begin.png", "end.png"):
-            fpath = os.path.join(scene_dir, fname)
-            if not os.path.isfile(fpath):
-                _write_placeholder_png(fpath)
+        os.makedirs(scene_dir, exist_ok=True)
+        baseline_path = os.path.join(scene_dir, "baseline.png")
+        if not os.path.isfile(baseline_path):
+            _write_placeholder_png(baseline_path)
+        # 默认只建第一个和最后一个阶段：绝大多数副本就这两个
+        for index, tag, stage_name in DEFAULT_STAGES:
+            key = stage_key(index, tag, stage_name)
+            flag_path, tpl_dir = _stage_paths(name, key)
+            os.makedirs(tpl_dir, exist_ok=True)
+            if not os.path.isfile(flag_path):
+                _write_placeholder_png(flag_path)
         return {"ok": True,
-                "msg": f"场景「{name}」已创建（已生成 baseline / begin / end 占位图，直接覆盖即可）"}
+                "msg": f"场景「{name}」已创建（默认生成 01_start_begin 与 02_end_result 两个阶段）"}
     except OSError as e:
         return {"ok": False, "msg": str(e)}
 
@@ -343,109 +769,52 @@ def delete_scene(name: str):
 
 
 @eel.expose
-def get_templates(scene: str):
-    """获取指定场景的模板列表（含缩略图 base64）"""
-    scene_dir = os.path.join(_templates_root, scene)
-    result = {"begin": [], "end": []}
-    if not os.path.isdir(scene_dir):
-        return result
+def screenshot_screen(window_title: str = ""):
+    """
+    截取屏幕，返回 base64。
 
-    disabled = _load_disabled_templates(scene)
+    window_title 非空时只截这个窗口，取景规则与运行时 Bot.capture_window 完全一致
+    （整窗口矩形、裁剪到屏幕内），这样模板/baseline 与运行时画面同尺度；为空则截整屏。
 
-    for ttype in ("begin", "end"):
-        tdir = os.path.join(scene_dir, ttype)
-        if not os.path.isdir(tdir):
-            continue
-        for fname in sorted(os.listdir(tdir)):
-            if fname.lower().endswith((".png", ".jpg", ".jpeg", ".bmp")):
-                fpath = os.path.join(tdir, fname)
-                thumb = _image_to_base64_thumb(fpath)
-                result[ttype].append({
-                    "filename": fname,
-                    "thumbnail": thumb,
-                    "enabled": fname not in disabled,
-                })
-    return result
-
-
-@eel.expose
-def toggle_template(scene: str, ttype: str, filename: str, enabled: bool):
-    """启用 / 禁用模板"""
-    disabled = _load_disabled_templates(scene)
-    if not enabled:
-        if filename not in disabled:
-            disabled.append(filename)
-    else:
-        if filename in disabled:
-            disabled.remove(filename)
-    _save_disabled_templates(scene, disabled)
-    return {"ok": True}
-
-
-@eel.expose
-def delete_template(scene: str, ttype: str, filename: str):
-    """删除模板文件"""
-    fpath = os.path.join(_templates_root, scene, ttype, filename)
-    if os.path.isfile(fpath):
-        os.remove(fpath)
-        disabled = _load_disabled_templates(scene)
-        if filename in disabled:
-            disabled.remove(filename)
-            _save_disabled_templates(scene, disabled)
-        return {"ok": True, "msg": "模板已删除"}
-    return {"ok": False, "msg": "文件不存在"}
-
-
-@eel.expose
-def import_template(scene: str, ttype: str, file_data: dict):
-    """前端通过文件选择器传入文件数据"""
-    tdir = os.path.join(_templates_root, scene, ttype)
-    os.makedirs(tdir, exist_ok=True)
-    name = file_data.get("name", "imported.png")
-    raw = base64.b64decode(file_data.get("data", ""))
-    fpath = os.path.join(tdir, name)
-    base, ext = os.path.splitext(name)
-    counter = 1
-    while os.path.exists(fpath):
-        fpath = os.path.join(tdir, f"{base}_{counter}{ext}")
-        counter += 1
-    with open(fpath, "wb") as f:
-        f.write(raw)
-    return {"ok": True, "msg": "模板已导入"}
-
-
-@eel.expose
-def capture_template(scene: str, ttype: str, image_data: str,
-                     x1: int, y1: int, x2: int, y2: int):
-    """保存截取的模板图片"""
-    from PIL import Image
-    tdir = os.path.join(_templates_root, scene, ttype)
-    os.makedirs(tdir, exist_ok=True)
-
-    raw = base64.b64decode(image_data)
-    img = Image.open(io.BytesIO(raw))
-
-    left, top = min(x1, x2), min(y1, y2)
-    right, bottom = max(x1, x2), max(y1, y2)
-    cropped = img.crop((left, top, right, bottom))
-
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    fpath = os.path.join(tdir, f"capture_{ts}.png")
-    cropped.save(fpath, "PNG")
-    return {"ok": True, "msg": "模板已保存", "filename": os.path.basename(fpath)}
-
-
-@eel.expose
-def screenshot_screen():
-    """截取当前屏幕，返回 base64"""
+    抓屏瞬间先把本程序自己的窗口（截屏窗、控制面板）临时藏起来，
+    否则弹出的截屏窗自己会被拍进图里。
+    """
     import pyautogui
     from PIL import Image
 
-    img: Image.Image = pyautogui.screenshot()
+    title = (window_title or "").strip()
+    hwnd = None
+    if title:
+        # 先找窗口再藏自己的窗口：自身窗口被藏起来就查不到，
+        # 也就报不出「你把控制面板选成游戏窗口了」这个真正的原因
+        hwnd, self_matched, _others = find_window_handle(title)
+        if not hwnd:
+            msg = (f"「{title}」指向的是本程序自己的窗口，不能用来截取模板"
+                   if self_matched else
+                   f"没找到标题含「{title}」的窗口，它可能已经关闭了")
+            return {"ok": False, "msg": msg, "width": 0, "height": 0, "data": ""}
+
+    hidden = _hide_self_windows()
+    try:
+        if hwnd:
+            restore_and_activate(hwnd)      # 最小化的先还原，再切到前台
+            time.sleep(0.15)
+            grabbed = grab_window_region(hwnd)
+            if grabbed is None:
+                return {"ok": False, "msg": "目标窗口不可见或完全在屏幕外",
+                        "width": 0, "height": 0, "data": ""}
+            img, left, top, width, height = grabbed
+        else:
+            img: Image.Image = pyautogui.screenshot()
+            left, top, width, height = 0, 0, img.width, img.height
+    finally:
+        _restore_windows(hidden)
+
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     data = base64.b64encode(buf.getvalue()).decode()
-    return {"width": img.width, "height": img.height, "data": data}
+    return {"ok": True, "width": width, "height": height, "data": data,
+            "window": title, "left": left, "top": top}
 
 
 @eel.expose
@@ -462,55 +831,17 @@ def save_baseline(scene: str, image_data: str):
 
 
 @eel.expose
-def check_flags(scene: str):
-    """检查场景的 begin / end 阶段旗帜是否已设置"""
-    scene_dir = os.path.join(_templates_root, scene)
-    return {
-        "begin": _image_status(os.path.join(scene_dir, "begin.png")),
-        "end": _image_status(os.path.join(scene_dir, "end.png")),
-    }
-
-
-@eel.expose
-def import_flag(scene: str, class_name: str, file_data: dict):
-    """导入 / 替换阶段旗帜（与 baseline.png 同级，文件名固定为 begin.png / end.png）"""
-    if class_name not in ("begin", "end"):
-        return {"ok": False, "msg": "阶段标识只能是 begin 或 end"}
-    scene_dir = os.path.join(_templates_root, scene)
-    if not os.path.isdir(scene_dir):
-        return {"ok": False, "msg": "场景不存在"}
-
-    path = os.path.join(scene_dir, f"{class_name}.png")
-    result = _save_material(path, file_data.get("data", ""), f"{class_name} 阶段旗帜")
-    if result.get("ok"):
-        result["msg"] = f"{class_name} 阶段旗帜已保存"
-        result["thumb"] = _image_to_base64_thumb(path)
-    return result
-
-
-@eel.expose
-def make_placeholder(scene: str, kind: str):
+def make_baseline_placeholder(scene: str):
     """
-    为场景生成初始占位素材（极小尺寸），用户直接用截图覆盖同名文件即可，无需自己命名。
-    kind: 'baseline' → baseline.png；'flag' → begin.png + end.png；'all' → 三个都生成
+    为场景生成 1×1 的 baseline 占位图，用户直接用截图覆盖同名文件即可。
+    （阶段标志不再需要占位图，阶段在模板管理里新建时已自带。）
     """
     scene_dir = os.path.join(_templates_root, scene)
     if not os.path.isdir(scene_dir):
         return {"ok": False, "msg": "场景不存在"}
-
-    targets = []
-    if kind in ("baseline", "all"):
-        targets.append("baseline.png")
-    if kind in ("flag", "all"):
-        targets += ["begin.png", "end.png"]
-    if not targets:
-        return {"ok": False, "msg": "无效的占位类型"}
-
     try:
-        for fname in targets:
-            _write_placeholder_png(os.path.join(scene_dir, fname))
-        return {"ok": True,
-                "msg": f"已生成初始占位图：{', '.join(targets)}（可直接用截图覆盖同名文件）"}
+        _write_placeholder_png(os.path.join(scene_dir, "baseline.png"))
+        return {"ok": True, "msg": "已生成 baseline.png 占位图（可直接用截图覆盖）"}
     except OSError as e:
         return {"ok": False, "msg": str(e)}
 
@@ -518,19 +849,72 @@ def make_placeholder(scene: str, kind: str):
 # ============================================================
 #  Eel 暴露接口 — 窗口检测
 # ============================================================
+# dev 模式下 eel 用浏览器打开页面，窗口标题可能只有 "Eel"，整词匹配即可
+_EEL_TITLE_RE = re.compile(r"\beel\b", re.IGNORECASE)
+
+
+def _iter_self_windows():
+    """枚举本程序自己的顶层可见窗口，返回 [hwnd, ...]"""
+    import win32gui
+
+    found = []
+
+    def _cb(hwnd, _extra):
+        if win32gui.IsWindowVisible(hwnd):
+            title = win32gui.GetWindowText(hwnd)
+            # app 模式下 eel 窗口的标题就是网页 title，一并按自身窗口处理。
+            # 这里用整词匹配，避免把 SteelSeries 之类含 eel 的无关窗口也算进来
+            if is_self_window(title) or _EEL_TITLE_RE.search(title):
+                found.append(hwnd)
+        return True
+
+    win32gui.EnumWindows(_cb, None)
+    return found
+
+
+def _hide_self_windows():
+    """
+    抓屏前临时藏起本程序自己的窗口，返回被藏的句柄列表。
+    已最小化的窗口跳过：它们本来就不在画面上，且恢复时会被弹回前台。
+    """
+    import win32gui
+    import win32con
+
+    hidden = []
+    for hwnd in _iter_self_windows():
+        if win32gui.IsIconic(hwnd):
+            continue
+        win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+        hidden.append(hwnd)
+    if hidden:
+        # 等桌面把窗口原来占的区域重绘完，否则可能抓到残影
+        time.sleep(0.2)
+    return hidden
+
+
+def _restore_windows(handles):
+    """把 _hide_self_windows 藏起来的窗口还原并置前"""
+    import win32gui
+    import win32con
+
+    for hwnd in handles:
+        if not win32gui.IsWindow(hwnd):
+            continue
+        win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+
+
 @eel.expose
 def minimize_self():
     """截取模板时最小化前端窗口"""
     import win32gui
     import win32con
 
-    def _cb(hwnd, _extra):
-        title = win32gui.GetWindowText(hwnd)
-        if "127.0.0.1" in title or "eel" in title.lower():
-            win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
-        return True
-
-    win32gui.EnumWindows(_cb, None)
+    for hwnd in _iter_self_windows():
+        win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
 
 
 @eel.expose
@@ -544,6 +928,9 @@ def get_windows():
         if not win32gui.IsWindowVisible(hwnd):
             return
         title = win32gui.GetWindowText(hwnd)
+        # 排除本程序自己的控制面板，避免它被当成游戏窗口选中
+        if is_self_window(title):
+            return
         if title and title.strip() and len(title.strip()) > 1:
             windows.append({"hwnd": hwnd, "title": title.strip()})
 
@@ -563,20 +950,38 @@ def _disabled_path(scene: str) -> str:
 
 
 def _load_disabled_templates(scene: str) -> list:
+    """.disabled.json 里记录被停用的模板文件名，由前端「停用」按钮写入"""
     path = _disabled_path(scene)
     if os.path.isfile(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            pass
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return []
+        if isinstance(data, list):
+            return [str(x) for x in data]
     return []
 
 
 def _save_disabled_templates(scene: str, disabled: list):
     path = _disabled_path(scene)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(disabled, f, ensure_ascii=False)
+        json.dump(disabled, f, ensure_ascii=False, indent=2)
+
+
+def _is_template_disabled(disabled: list, key: str, filename: str) -> bool:
+    """清单按「阶段 key/文件名」记录；同时兼容手工写的纯文件名条目"""
+    return f"{key}/{filename}" in disabled or filename in disabled
+
+
+def _drop_disabled_entry(disabled: list, key: str, filename: str) -> bool:
+    """清掉该模板的停用记录（新旧两种写法都清），返回清单是否被改动"""
+    changed = False
+    for entry in (f"{key}/{filename}", filename):
+        if entry in disabled:
+            disabled.remove(entry)
+            changed = True
+    return changed
 
 
 # 占位素材判定阈值：短边小于该值（像素）的图片视为「未设置」
@@ -618,7 +1023,8 @@ def _save_material(path: str, image_data: str, label: str = "素材") -> dict:
         img = Image.open(io.BytesIO(raw))
         if img.width < _PLACEHOLDER_MAX_PX or img.height < _PLACEHOLDER_MAX_PX:
             return {"ok": False,
-                    "msg": f"图片尺寸过小（{img.width}x{img.height}），无法作为{label}"}
+                    "msg": f"图片尺寸过小（{img.width}x{img.height}），"
+                           f"{label}需要短边至少 {_PLACEHOLDER_MAX_PX}px"}
         img.convert("RGB").save(path, "PNG")
         return {"ok": True, "msg": f"{label}已保存",
                 "width": img.width, "height": img.height}
@@ -662,5 +1068,41 @@ def run():
         manager.shutdown()
 
 
+def _ensure_admin() -> bool:
+    """
+    游戏窗口若以管理员身份运行，本程序不提权时 Windows 会直接丢弃所有
+    鼠标输入，表现就是「日志有点击、鼠标不动、游戏没反应」。
+
+    :return True 表示当前已是管理员（或无法提权但不该阻塞启动）；
+            False 表示已经用管理员身份重新拉起，当前进程应当退出
+    """
+    try:
+        import ctypes
+        if ctypes.windll.shell32.IsUserAnAdmin():
+            return True
+    except Exception:
+        return True
+    # 提权后被 UAC 拒绝过就别再循环弹窗
+    if os.environ.get("YYS_ELEVATE_TRIED") == "1":
+        return True
+    os.environ["YYS_ELEVATE_TRIED"] = "1"
+    try:
+        import ctypes
+        import subprocess
+        if getattr(sys, "frozen", False):
+            exe, args = sys.executable, ""
+        else:
+            exe = sys.executable
+            args = subprocess.list2cmdline([os.path.abspath(sys.argv[0])] + sys.argv[1:])
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, args, BASE_DIR, 1)
+        if rc > 32:
+            return False
+    except Exception:
+        pass
+    return True
+
+
 if __name__ == "__main__":
+    if not _ensure_admin():
+        sys.exit(0)
     run()

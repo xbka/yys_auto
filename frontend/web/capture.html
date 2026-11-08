@@ -33,7 +33,7 @@
 <body>
 
 <div id="infoBar">
-  <span>📸 拖拽框选目标区域 ｜ 当前缩放: <b id="zoomLabel">100%</b></span>
+  <span><span id="shotScope">📸 拖拽框选目标区域</span> ｜ 当前缩放: <b id="zoomLabel">100%</b></span>
   <span class="keys">Enter 确认 ｜ Esc 取消 ｜ 滚轮缩放</span>
 </div>
 
@@ -57,9 +57,17 @@ let curX = 0, curY = 0;
 // ============================================================
 //  加载截图
 // ============================================================
+// 主窗口通过 ?win= 传入当前场景绑定的游戏窗口；没有就用整屏
+const TARGET_WINDOW = new URLSearchParams(location.search).get("win") || "";
+
 async function loadScreenshot() {
   try {
-    const s = await eel.screenshot_screen()();
+    const s = await eel.screenshot_screen(TARGET_WINDOW)();
+    if (!s || !s.ok) {
+      document.getElementById("infoBar").textContent =
+        "❌ 截屏失败：" + ((s && s.msg) || "未知错误");
+      return;
+    }
     img = new Image();
     img.onload = () => {
       // 计算初始缩放，使图片适配窗口
@@ -212,6 +220,9 @@ document.addEventListener("keydown", (e) => {
 // ============================================================
 window.addEventListener("load", () => {
   document.title = "截取模板 — 拖拽框选目标区域";
+  if (TARGET_WINDOW) {
+    document.getElementById("shotScope").textContent = "📸 只截窗口：" + TARGET_WINDOW;
+  }
   loadScreenshot();
 });
 </script>

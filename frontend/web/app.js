@@ -19,7 +19,6 @@ document.querySelectorAll(".tab").forEach(btn => {
 //  全局变量
 // ============================================================
 let _currentScene = "";
-let _captureType = "";   // 'begin' | 'end' for capture flow
 let _instances = [];     // [{id, name, state, ...}, ...]
 let _globalCfg = {};
 let _pollTimer = null;
@@ -356,8 +355,8 @@ function loadGlobalConfigToForm(cfg) {
   setVal("cfgThreshold", cfg.threshold ?? 0.75);
   setVal("cfgDetectScale", cfg.detection_scale ?? 0.5);
   setVal("cfgMatchConfirm", cfg.match_confirm_count ?? 2);
-  setVal("cfgMouseMin", cfg.mouse_speed_min ?? 2750);
-  setVal("cfgMouseMax", cfg.mouse_speed_max ?? 3250);
+  setVal("cfgMouseMin", cfg.mouse_speed_min ?? 1500);
+  setVal("cfgMouseMax", cfg.mouse_speed_max ?? 2000);
   setVal("cfgRestRounds", cfg.rest_rounds ?? 50);
   setVal("cfgRestRoundsVar", cfg.rest_rounds_var ?? 10);
   setVal("cfgRestSeconds", cfg.rest_seconds ?? 30);
@@ -412,8 +411,8 @@ document.getElementById("btnSaveCfg").addEventListener("click", async () => {
   c.threshold     = parseFloat(document.getElementById("cfgThreshold").value)     || 0.75;
   c.detection_scale = parseFloat(document.getElementById("cfgDetectScale").value) || 0.5;
   c.match_confirm_count = parseInt(document.getElementById("cfgMatchConfirm").value) || 2;
-  c.mouse_speed_min  = parseInt(document.getElementById("cfgMouseMin").value)  || 2750;
-  c.mouse_speed_max  = parseInt(document.getElementById("cfgMouseMax").value)  || 3250;
+  c.mouse_speed_min  = parseInt(document.getElementById("cfgMouseMin").value)  || 1500;
+  c.mouse_speed_max  = parseInt(document.getElementById("cfgMouseMax").value)  || 2000;
   c.rest_rounds      = parseInt(document.getElementById("cfgRestRounds").value)    || 50;
   c.rest_rounds_var  = parseInt(document.getElementById("cfgRestRoundsVar").value)  || 10;
   c.rest_seconds     = parseInt(document.getElementById("cfgRestSeconds").value)     || 30;
@@ -460,18 +459,22 @@ function populateSceneSelector(scenes, current) {
     sel.innerHTML = '<option value="">-- 无场景 --</option>';
     _currentScene = "";
   }
-  if (_currentScene) loadTemplates(_currentScene);
+  if (_currentScene) loadStages(_currentScene);
   else updateBaselineUI("");
 }
 
 document.getElementById("selScene")?.addEventListener("change", function() {
   _currentScene = this.value;
-  if (_currentScene) loadTemplates(_currentScene);
+  if (_currentScene) loadStages(_currentScene);
 });
 
 document.getElementById("btnNewScene")?.addEventListener("click", async () => {
-  const name = prompt("输入新场景名称（中文 OK）：");
+  const name = prompt("输入新场景名称（只能用英文 / 数字，不能含中文）：");
   if (!name || !name.trim()) return;
+  if (/[^\x00-\x7F]/.test(name.trim())) {
+    alert("场景名不能含中文，请改用英文、数字或下划线（例如 chi、hunwang、999）");
+    return;
+  }
   const r = await eel.create_scene(name)();
   if (r.ok) {
     const cfg = await eel.get_config()();
@@ -496,65 +499,191 @@ document.getElementById("btnDelScene")?.addEventListener("click", async () => {
 // ============================================================
 //  模板加载 & 交互
 // ============================================================
-async function loadTemplates(scene) {
+const STAGE_TAG_LABEL = { start: "开始", mid: "中间", end: "结束" };
+
+async function loadStages(scene) {
+  const el = document.getElementById("stageList");
+  if (!el) return;
+  if (!scene) {
+    el.innerHTML = '<div class="empty-hint">请先选择或新建场景</div>';
+    updateBaselineUI("");
+    return;
+  }
   try {
-    const tpls = await eel.get_templates(scene)();
-    renderTemplateCards("tplBegin", tpls.begin, "begin", scene);
-    renderTemplateCards("tplEnd", tpls.end, "end", scene);
+    const r = await eel.list_stages(scene)();
+    if (!r.ok) el.innerHTML = `<div class="empty-hint">${escHtml(r.msg || "加载失败")}</div>`;
+    else renderStages(r.stages);
   } catch (e) {
-    console.error("loadTemplates error:", e);
+    console.error("loadStages error:", e);
   }
   updateBaselineUI(scene);
 }
 
-function renderTemplateCards(containerId, items, ttype, scene) {
-  const el = document.getElementById(containerId);
+function renderStages(stages) {
+  const el = document.getElementById("stageList");
   if (!el) return;
-  if (!items || items.length === 0) {
-    el.innerHTML = '<div class="empty-hint">暂无模板</div>';
+  if (!stages || stages.length === 0) {
+    el.innerHTML = '<div class="empty-hint">还没有阶段，点右上角「＋ 新增阶段」</div>';
     return;
   }
-  el.innerHTML = items.map(item => `
-    <div class="tpl-card ${item.enabled ? "" : "disabled"}">
-      <button class="tmpl-del" title="删除" onclick="delTemplate('${escAttr(scene)}','${escAttr(ttype)}','${escAttr(item.filename)}')">&times;</button>
-      <img src="data:image/png;base64,${item.thumbnail}" alt="${escHtml(item.filename)}">
-      <div class="tmpl-name" title="${escHtml(item.filename)}">${escHtml(item.filename)}</div>
-      <button class="tmpl-toggle" onclick="toggleTpl(this,'${escAttr(scene)}','${escAttr(ttype)}','${escAttr(item.filename)}')">
-        ${item.enabled ? "✅ 启用" : "❌ 禁用"}
-      </button>
-    </div>
-  `).join("");
+  // 位置规则：start 固定第一位、end 固定最后一位，只有 mid 能在两者之间调换
+  const firstMid = stages.findIndex(s => s.tag === "mid");
+  const lastMid = stages.length - 1 - [...stages].reverse().findIndex(s => s.tag === "mid");
+
+  el.innerHTML = stages.map((st, i) => {
+    const isMid = st.tag === "mid";
+    const canUp = isMid && i > firstMid;
+    const canDown = isMid && i < lastMid;
+    const upTitle = canUp ? "上移" : (isMid ? "已经是第一个中间阶段" : "开始 / 结束阶段固定在首尾");
+    const downTitle = canDown ? "下移" : (isMid ? "已经是最后一个中间阶段" : "开始 / 结束阶段固定在首尾");
+    const flagOk = st.flag && st.flag.exists;
+    const flagBox = flagOk
+      ? `<img class="stage-flag" src="data:image/png;base64,${st.flag_thumb}" alt="阶段标志">`
+      : `<div class="stage-flag missing">未设置标志</div>`;
+    const tpls = (st.templates || []).length
+      ? st.templates.map(t => `
+          <div class="tpl-card ${t.enabled ? "" : "disabled"}">
+            <button class="tmpl-del" title="删除"
+              onclick="delStageTemplate('${escAttr(st.key)}','${escAttr(t.filename)}')">&times;</button>
+            <img src="data:image/png;base64,${t.thumbnail}" alt="${escHtml(t.filename)}">
+            <div class="tmpl-name" title="${escHtml(t.filename)}">${escHtml(t.filename)}</div>
+            <button class="tmpl-toggle" title="${t.enabled ? "停用：运行时不参与匹配" : "启用：恢复参与匹配"}"
+              onclick="toggleStageTemplate('${escAttr(st.key)}','${escAttr(t.filename)}',${t.enabled ? "false" : "true"})"
+              >${t.enabled ? "⏸ 停用" : "▶ 启用"}</button>
+          </div>`).join("")
+      : '<div class="empty-hint">暂无按钮模板</div>';
+    return `
+      <div class="stage-card" data-key="${escAttr(st.key)}">
+        <div class="stage-head">
+          <span class="stage-index">${String(st.index).padStart(2, "0")}</span>
+          <span class="stage-tag tag-${st.tag}">${STAGE_TAG_LABEL[st.tag] || st.tag}</span>
+          <span class="stage-name">${escHtml(st.name)}</span>
+          <span class="stage-key">${escHtml(st.key)}</span>
+          <span class="stage-actions">
+            <button class="btn btn-sm" title="${upTitle}"
+              onclick="moveStage('${escAttr(st.key)}','up')" ${canUp ? "" : "disabled"}>↑</button>
+            <button class="btn btn-sm" title="${downTitle}"
+              onclick="moveStage('${escAttr(st.key)}','down')" ${canDown ? "" : "disabled"}>↓</button>
+            <button class="btn btn-sm" onclick="editStage('${escAttr(st.key)}','${escAttr(st.name)}','${st.tag}')">✏ 编辑</button>
+            <button class="btn btn-sm btn-danger" onclick="delStage('${escAttr(st.key)}','${escAttr(st.name)}')">🗑 删除</button>
+          </span>
+        </div>
+        <div class="stage-body">
+          <div class="stage-flag-col">
+            <div class="stage-label">阶段标志 <span class="stage-sub">（这一页的固定特征）</span></div>
+            ${flagBox}
+            <div class="stage-flag-actions">
+              <button class="btn btn-sm" onclick="importStageFlag('${escAttr(st.key)}')">📁 导入</button>
+              <button class="btn btn-sm" onclick="captureStage('${escAttr(st.key)}','flag')">📷 截取</button>
+            </div>
+          </div>
+          <div class="stage-tpl-col">
+            <div class="stage-label">按钮模板 <span class="stage-sub">（这一页要点的按钮）</span></div>
+            <div class="tpl-grid">${tpls}</div>
+            <div class="stage-tpl-actions">
+              <button class="btn btn-sm" onclick="importStageTpl('${escAttr(st.key)}')">📁 导入</button>
+              <button class="btn btn-sm" onclick="captureStage('${escAttr(st.key)}','template')">📷 截取</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }).join("");
 }
 
-async function toggleTpl(btn, scene, ttype, filename) {
-  const card = btn.closest(".tpl-card");
-  const isEnabled = !card.classList.contains("disabled");
-  const r = await eel.toggle_template(scene, ttype, filename, !isEnabled)();
-  if (r.ok) {
-    card.classList.toggle("disabled");
-    btn.textContent = isEnabled ? "❌ 禁用" : "✅ 启用";
+// 点击卡片标记选中，新增阶段会插到选中行之后
+document.getElementById("stageList")?.addEventListener("click", (e) => {
+  const card = e.target.closest(".stage-card");
+  if (!card) return;
+  document.querySelectorAll(".stage-card").forEach(c => c.classList.remove("selected"));
+  card.classList.add("selected");
+});
+
+document.getElementById("btnAddStage")?.addEventListener("click", async () => {
+  if (!_currentScene) { alert("请先选择场景"); return; }
+  const name = prompt("输入阶段名（小写英文 / 数字 / 下划线，例如 mvp）：");
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  if (/[^\x00-\x7F]/.test(trimmed)) {
+    alert("阶段名不能含中文，请改用英文、数字或下划线（例如 mvp、reward）");
+    return;
+  }
+  const sel = document.querySelector(".stage-card.selected");
+  const r = await eel.add_stage(_currentScene, trimmed, "mid", sel ? sel.dataset.key : "")();
+  if (!r.ok) alert(r.msg);
+  loadStages(_currentScene);
+});
+
+window.moveStage = async function (key, direction) {
+  const r = await eel.move_stage(_currentScene, key, direction)();
+  if (!r.ok) alert(r.msg);
+  loadStages(_currentScene);
+};
+
+window.editStage = async function (key, name, tag) {
+  const newName = prompt(`修改阶段名（当前：${name}）\n只能用 1~12 个小写字母 / 数字 / 下划线`, name);
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (/[^\x00-\x7F]/.test(trimmed)) { alert("阶段名不能含中文"); return; }
+  const label = prompt("标签：start = 开始（计时起点），mid = 中间页，end = 结束（一把到此结束）", tag);
+  if (label === null) return;
+  const t = label.trim().toLowerCase();
+  if (!["start", "mid", "end"].includes(t)) { alert("标签只能是 start / mid / end"); return; }
+  const r = await eel.update_stage(_currentScene, key, trimmed, t)();
+  if (!r.ok) alert(r.msg);
+  loadStages(_currentScene);
+};
+
+window.delStage = async function (key, name) {
+  if (!confirm(`确定删除阶段「${name}」？\n它的标志图和按钮模板会一起删除。`)) return;
+  const r = await eel.delete_stage(_currentScene, key)();
+  if (!r.ok) alert(r.msg);
+  loadStages(_currentScene);
+};
+
+window.delStageTemplate = async function (key, filename) {
+  if (!confirm(`确定删除按钮模板「${filename}」？`)) return;
+  const r = await eel.delete_stage_template(_currentScene, key, filename)();
+  if (!r.ok) alert(r.msg);
+  loadStages(_currentScene);
+};
+
+window.toggleStageTemplate = async function (key, filename, enabled) {
+  const r = await eel.set_template_enabled(_currentScene, key, filename, enabled)();
+  if (!r.ok) alert(r.msg);
+  loadStages(_currentScene);
+};
+
+// ============================================================
+//  截屏工具（阶段标志 / 按钮模板）
+// ============================================================
+let _captureStage = { key: "", kind: "" };
+
+// 当前场景绑定的游戏窗口：有实例选中该场景且指定了窗口就返回它的标题，否则返回空（=整屏截图）
+async function detectSceneWindowTitle() {
+  if (!_currentScene) return "";
+  try {
+    const cfg = await eel.get_config()();
+    const hit = (cfg.instances || []).find(
+      ic => ic.template_scene === _currentScene && (ic.window_title || "").trim());
+    return hit ? hit.window_title.trim() : "";
+  } catch (e) {
+    console.warn("detectSceneWindowTitle error:", e);
+    return "";
   }
 }
 
-async function delTemplate(scene, ttype, filename) {
-  if (!confirm(`确定删除模板「${filename}」？`)) return;
-  const r = await eel.delete_template(scene, ttype, filename)();
-  if (r.ok) loadTemplates(scene);
-  else alert(r.msg);
-}
-
-// ============================================================
-//  截屏工具（模板）
-// ============================================================
-window.startCapture = function(ttype) {
+window.captureStage = async function (key, kind) {
   if (!_currentScene) { alert("请先选择场景"); return; }
-  _captureType = ttype;
-  eel.minimize_self();
+  _captureStage = { key, kind };
+  const win = await detectSceneWindowTitle();
+  await eel.minimize_self();
   const w = 1020, h = 680;
   const left = (screen.width - w) / 2;
   const top = (screen.height - h) / 2;
+  const url = "capture.html" + (win ? "?win=" + encodeURIComponent(win) : "");
   setTimeout(() => {
-    window.open("capture.html", "captureWindow",
+    window.open(url, "captureWindow",
       `width=${w},height=${h},left=${left},top=${top},resizable=yes`);
   }, 300);
 };
@@ -563,40 +692,45 @@ window.startCapture = function(ttype) {
 window.addEventListener("message", async (e) => {
   if (e.data?.type === "capture_result") {
     const { imageData, x1, y1, x2, y2 } = e.data;
-    const r = await eel.capture_template(
-      _currentScene, _captureType, imageData, x1, y1, x2, y2
+    const r = await eel.capture_stage(
+      _currentScene, _captureStage.key, _captureStage.kind,
+      imageData, x1, y1, x2, y2
     )();
-    if (r.ok) {
-      loadTemplates(_currentScene);
-    } else {
-      alert("截取失败：" + r.msg);
-    }
+    if (r.ok) loadStages(_currentScene);
+    else alert("截取失败：" + r.msg);
   }
 });
 
 // ============================================================
-//  导入本地图片
+//  导入本地图片（阶段标志 / 按钮模板）
 // ============================================================
-let _importType = "";
-window.importLocal = function(ttype) {
+let _stageImport = { key: "", kind: "" };
+
+window.importStageFlag = function (key) {
   if (!_currentScene) { alert("请先选择场景"); return; }
-  _importType = ttype;
-  document.getElementById("fileImport").click();
+  _stageImport = { key, kind: "flag" };
+  document.getElementById("stageImportInput").click();
 };
 
-document.getElementById("fileImport").addEventListener("change", async function() {
+window.importStageTpl = function (key) {
+  if (!_currentScene) { alert("请先选择场景"); return; }
+  _stageImport = { key, kind: "template" };
+  document.getElementById("stageImportInput").click();
+};
+
+document.getElementById("stageImportInput")?.addEventListener("change", async function () {
   const file = this.files[0];
-  if (!file || !_currentScene) return;
+  if (!file || !_currentScene || !_stageImport.key) return;
   const reader = new FileReader();
   reader.onload = async () => {
-    const raw = reader.result;
-    const b64 = raw.split(",")[1];
-    const r = await eel.import_template(_currentScene, _importType, {
-      name: file.name,
-      data: b64,
-    })();
-    if (r.ok) loadTemplates(_currentScene);
-    else alert("导入失败：" + r.msg);
+    const b64 = String(reader.result).split(",")[1];
+    const r = _stageImport.kind === "flag"
+      ? await eel.import_stage_flag(_currentScene, _stageImport.key, { data: b64 })()
+      : await eel.import_stage_template(_currentScene, _stageImport.key, {
+          name: file.name, data: b64,
+        })();
+    if (!r.ok) alert("导入失败：" + r.msg);
+    loadStages(_currentScene);
   };
   reader.readAsDataURL(file);
   this.value = "";
@@ -607,15 +741,12 @@ document.getElementById("fileImport").addEventListener("change", async function(
 // ============================================================
 async function updateBaselineUI(scene) {
   const card = document.getElementById("baselineCard");
-  const flagCard = document.getElementById("flagCard");
   if (!card) return;
   if (!scene) {
     card.style.display = "none";
-    if (flagCard) flagCard.style.display = "none";
     return;
   }
   card.style.display = "";
-  if (flagCard) flagCard.style.display = "";
   try {
     const r = await eel.check_baseline(scene)();
     const statusEl = document.getElementById("baselineStatus");
@@ -634,16 +765,20 @@ async function updateBaselineUI(scene) {
   } catch (e) {
     console.error("checkBaseline error:", e);
   }
-  updateFlagUI(scene);
 }
 
-// 截取基准图（全屏截图，不需要裁剪）
+// 截取基准图（绑定窗口就只截该窗口，否则整屏，不需要裁剪）
 async function captureBaseline() {
   if (!_currentScene) { alert("请先选择场景"); return; }
+  const win = await detectSceneWindowTitle();
   await eel.minimize_self();
   await new Promise(r => setTimeout(r, 600));
   try {
-    const r = await eel.screenshot_screen()();
+    const r = await eel.screenshot_screen(win)();
+    if (!r || !r.ok) {
+      alert("截取失败：" + ((r && r.msg) || "未知错误"));
+      return;
+    }
     const result = await eel.save_baseline(_currentScene, r.data)();
     if (result.ok) {
       updateBaselineUI(_currentScene);
@@ -681,77 +816,17 @@ document.getElementById("baselineImportInput")?.addEventListener("change", async
 });
 
 // ============================================================
-//  阶段标志（旗帜）
+//  生成基准占位图
 // ============================================================
-async function updateFlagUI(scene) {
-  if (!scene) return;
-  let flags = null;
-  try {
-    flags = await eel.check_flags(scene)();
-  } catch (e) {
-    console.error("checkFlags error:", e);
-  }
-  renderFlagStatus("flagBeginStatus", "begin", flags && flags.begin);
-  renderFlagStatus("flagEndStatus", "end", flags && flags.end);
-}
-
-function renderFlagStatus(elId, label, status) {
-  const el = document.getElementById(elId);
-  if (!el) return;
-  if (status && status.exists) {
-    el.textContent = `${label} 已设置 ${status.width}×${status.height}`;
-    el.className = "baseline-status ready";
-  } else {
-    el.textContent = `${label} 未设置`;
-    el.className = "baseline-status missing";
-  }
-}
-
-let _flagImportType = "begin";
-
-document.getElementById("btnImportFlagBegin")?.addEventListener("click", () => {
+async function makeBaselinePlaceholder() {
   if (!_currentScene) { alert("请先选择场景"); return; }
-  _flagImportType = "begin";
-  document.getElementById("flagImportInput").click();
-});
-
-document.getElementById("btnImportFlagEnd")?.addEventListener("click", () => {
-  if (!_currentScene) { alert("请先选择场景"); return; }
-  _flagImportType = "end";
-  document.getElementById("flagImportInput").click();
-});
-
-document.getElementById("flagImportInput")?.addEventListener("change", async function() {
-  const file = this.files[0];
-  if (!file || !_currentScene) return;
-  const reader = new FileReader();
-  reader.onload = async () => {
-    const b64 = String(reader.result).split(",")[1];
-    const r = await eel.import_flag(_currentScene, _flagImportType, { data: b64 })();
-    if (r.ok) updateFlagUI(_currentScene);
-    else alert("导入失败：" + r.msg);
-  };
-  reader.readAsDataURL(file);
-  this.value = "";
-});
-
-// ============================================================
-//  生成初始占位图
-// ============================================================
-async function makePlaceholder(kind) {
-  if (!_currentScene) { alert("请先选择场景"); return; }
-  const what = kind === "baseline" ? "baseline.png" : "begin.png / end.png";
-  if (!confirm(`将生成初始占位图（${what}），会覆盖当前已上传的同名素材。\n\n确定继续？`)) return;
-  const r = await eel.make_placeholder(_currentScene, kind)();
-  if (r.ok) {
-    if (kind === "baseline") updateBaselineUI(_currentScene);
-    else updateFlagUI(_currentScene);
-  }
+  if (!confirm("将生成 1×1 的 baseline 占位图，会覆盖当前的基准图。\n\n确定继续？")) return;
+  const r = await eel.make_baseline_placeholder(_currentScene)();
+  if (r.ok) updateBaselineUI(_currentScene);
   alert(r.msg);
 }
 
-document.getElementById("btnMakeBaselineHolder")?.addEventListener("click", () => makePlaceholder("baseline"));
-document.getElementById("btnMakeFlagHolder")?.addEventListener("click", () => makePlaceholder("flag"));
+document.getElementById("btnMakeBaselineHolder")?.addEventListener("click", makeBaselinePlaceholder);
 
 // ============================================================
 //  工具函数
@@ -773,8 +848,43 @@ function escAttr(str) {
 
 // ============================================================
 //  点击分布散点图（坐标相对窗口，比例与游戏窗口一致）
-//  叠加两个阶段学习到的「可点击范围」外轮廓（后端已合并成整体）
+//  每个阶段的「可点击范围」外轮廓与点击点用各自颜色标识
 // ============================================================
+const STAGE_PALETTE = [
+  "33, 150, 243",   // 蓝
+  "76, 175, 80",    // 绿
+  "255, 152, 0",    // 橙
+  "156, 39, 176",   // 紫
+  "233, 30, 99",    // 玫红
+  "0, 188, 212",    // 青
+  "255, 193, 7",    // 琥珀
+  "121, 85, 72",    // 棕
+  "63, 81, 181",    // 靛
+  "139, 195, 74",   // 草绿
+];
+
+// 阶段键形如 "01_start_begin"，按编号排序后再按顺序取色（颜色稳定可辨认）
+function stageOrderOf(key) {
+  const n = parseInt(String(key), 10);
+  return Number.isFinite(n) ? n : 999;
+}
+
+function stageColorOf(index) {
+  const rgb = STAGE_PALETTE[index % STAGE_PALETTE.length];
+  return {
+    fill:   `rgba(${rgb}, 0.12)`,
+    stroke: `rgba(${rgb}, 0.60)`,
+    dot:    `rgba(${rgb}, 0.75)`,
+    solid:  `rgb(${rgb})`,
+  };
+}
+
+// 图例文字用「序号 + 名字」，完整 key 太长会把图例挤爆
+function stageShortLabel(key) {
+  const m = String(key).match(/^(\d+)_(?:start|mid|end)_(.+)$/);
+  return m ? `${m[1]} ${m[2]}` : String(key);
+}
+
 function drawClickChart(canvas, positions, windowRect, regionOutline) {
   positions = positions || [];
   const hasRegions = !!(regionOutline && Object.keys(regionOutline).length);
@@ -830,55 +940,63 @@ function drawClickChart(canvas, positions, windowRect, regionOutline) {
     ctx.stroke();
   }
 
-  // 可点击范围的外轮廓（垫在散点下面）
-  // 轮廓已由后端合并成整体，这里把所有多边形放进同一条路径，
-  // 只 fill / stroke 各一次 —— 重叠处不会加深，也不会出现内部边线
-  if (hasRegions) {
-    const REGION_STYLE = {
-      end:   { fill: "rgba(33, 150, 243, 0.10)", stroke: "rgba(33, 150, 243, 0.55)" },
-      begin: { fill: "rgba(76, 175, 80, 0.10)",  stroke: "rgba(76, 175, 80, 0.55)"  },
-    };
-    const toPx = (pt) => [
-      offX + (pt[0] / winW) * plotW,
-      offY + (pt[1] / winH) * plotH,
-    ];
-    for (const stage of ["end", "begin"]) {
-      const polys = regionOutline[stage];
-      if (!polys || !polys.length) continue;
-      const style = REGION_STYLE[stage] || REGION_STYLE.end;
-      ctx.beginPath();
-      for (const poly of polys) {
-        poly.forEach((pt, i) => {
-          const [px, py] = toPx(pt);
-          if (i === 0) ctx.moveTo(px, py);
-          else ctx.lineTo(px, py);
-        });
-        ctx.closePath();
-      }
-      ctx.fillStyle = style.fill;
-      ctx.fill("evenodd");   // 外轮廓与内部空洞在同一路径里，evenodd 会自动挖洞
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = style.stroke;
-      ctx.stroke();
-    }
-  }
+  // 收集出现过的阶段（轮廓和点击点都算），按编号排序后统一分配颜色
+  const seenKeys = new Set();
+  const stageKeys = [];
+  const addKey = (k) => {
+    const s = String(k == null ? "" : k);
+    if (!s || seenKeys.has(s)) return;
+    seenKeys.add(s);
+    stageKeys.push(s);
+  };
+  Object.keys(regionOutline || {}).forEach(addKey);
+  positions.forEach(p => addKey(p[0]));
+  stageKeys.sort((a, b) => stageOrderOf(a) - stageOrderOf(b) || a.localeCompare(b));
+  const colors = new Map(stageKeys.map((k, i) => [k, stageColorOf(i)]));
 
-  // 先 end（蓝），后 begin（绿 → 上层醒目）
-  const RADIUS = 2.5;
-  const layers = [
-    { cls: "end",   color: "rgba(33, 150, 243, 0.7)"  },
-    { cls: "begin", color: "rgba(76, 175, 80, 0.85)"  },
+  const toPx = (pt) => [
+    offX + (pt[0] / winW) * plotW,
+    offY + (pt[1] / winH) * plotH,
   ];
 
-  for (const layer of layers) {
-    ctx.fillStyle = layer.color;
-    for (const item of positions) {
-      if (item[0] !== layer.cls) continue;
+  // 可点击范围的外轮廓（垫在散点下面）：每个阶段单独一条路径、单独颜色，
+  // 同一阶段内部仍用 evenodd 填充，重叠处不会加深、也不会出现内部接缝
+  for (const key of stageKeys) {
+    const polys = (regionOutline || {})[key];
+    if (!polys || !polys.length) continue;
+    const c = colors.get(key);
+    ctx.beginPath();
+    for (const poly of polys) {
+      poly.forEach((pt, i) => {
+        const [px, py] = toPx(pt);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.closePath();
+    }
+    ctx.fillStyle = c.fill;
+    ctx.fill("evenodd");
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = c.stroke;
+    ctx.stroke();
+  }
+
+  // 点击散点：同样按阶段上色，先分组避免每层重复遍历
+  const RADIUS = 2.5;
+  const ptsByKey = new Map();
+  for (const item of positions) {
+    const k = String(item[0] == null ? "" : item[0]);
+    if (!ptsByKey.has(k)) ptsByKey.set(k, []);
+    ptsByKey.get(k).push(item);
+  }
+  for (const key of stageKeys) {
+    const pts = ptsByKey.get(key);
+    if (!pts) continue;
+    ctx.fillStyle = colors.get(key).dot;
+    for (const item of pts) {
       // 坐标已是窗口内相对坐标（后端记录时已扣除窗口位置）
-      const relX = item[1];
-      const relY = item[2];
-      const px = offX + (relX / winW) * plotW;
-      const py = offY + (relY / winH) * plotH;
+      const px = offX + (item[1] / winW) * plotW;
+      const py = offY + (item[2] / winH) * plotH;
       // 边界裁剪（窗口边缘可能超出截图区域）
       if (px < offX - 2 || px > offX + plotW + 2 || py < offY - 2 || py > offY + plotH + 2) continue;
       ctx.beginPath();
@@ -887,20 +1005,25 @@ function drawClickChart(canvas, positions, windowRect, regionOutline) {
     }
   }
 
-  // 图例
-  const lx = offX + 4, ly = offY + plotH - 14;
+  // 图例：每个阶段一个色块，一行放不下就向上换行（不压到绘图区外）
   ctx.font = "10px sans-serif";
-  ctx.fillStyle = "rgba(76, 175, 80, 0.95)";
-  ctx.fillRect(lx, ly - 5, 8, 8);
-  ctx.fillStyle = "#555";
   ctx.textAlign = "left";
-  ctx.fillText("begin", lx + 12, ly + 3);
-  ctx.fillStyle = "rgba(33, 150, 243, 0.95)";
-  ctx.fillRect(lx + 54, ly - 5, 8, 8);
-  ctx.fillText("end", lx + 66, ly + 3);
-  if (hasRegions) {
-    ctx.fillStyle = "#999";
-    ctx.fillText("轮廓=可点击范围", lx + 108, ly + 3);
+  let lx = offX + 4;
+  let ly = offY + plotH - 6;
+  const maxX = offX + plotW - 4;
+  for (const key of stageKeys) {
+    const c = colors.get(key);
+    const label = stageShortLabel(key);
+    const tw = ctx.measureText(label).width;
+    if (lx + 11 + tw > maxX && lx > offX + 4) {
+      lx = offX + 4;
+      ly -= 13;
+    }
+    ctx.fillStyle = c.solid;
+    ctx.fillRect(lx, ly - 8, 8, 8);
+    ctx.fillStyle = "#555";
+    ctx.fillText(label, lx + 11, ly);
+    lx += 11 + tw + 10;
   }
 }
 
